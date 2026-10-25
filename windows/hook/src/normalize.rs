@@ -36,6 +36,7 @@ pub fn event(name: &str) -> &str {
         "sessionEnd" => "SessionEnd",
         // Cursor
         "beforeSubmitPrompt" => "UserPromptSubmit",
+        "beforeShellExecution" | "beforeMCPExecution" => "PreToolUse",
         "postToolUseFailure" => "PostToolUseFailure",
         "subagentStart" => "SubagentStart",
         "subagentStop" => "SubagentStop",
@@ -62,6 +63,17 @@ fn non_empty_str<'a>(map: &'a Map<String, Value>, key: &str) -> Option<&'a str> 
 /// `env` reads an environment variable (a parameter so tests stay pure).
 pub fn fields(map: &mut Map<String, Value>, env: &dyn Fn(&str) -> Option<String>) {
     let tool_call = map.get("toolCall").and_then(Value::as_object).cloned();
+    let raw_event = non_empty_str(map, "hook_event_name").unwrap_or_default();
+
+    // Cursor's permission hooks use a distinct shell payload.
+    if raw_event == "beforeShellExecution" {
+        map.entry("tool_name").or_insert_with(|| Value::String("Bash".into()));
+        if !map.contains_key("tool_input") {
+            if let Some(command) = non_empty_str(map, "command") {
+                map.insert("tool_input".into(), serde_json::json!({ "command": command }));
+            }
+        }
+    }
 
     if !map.contains_key("tool_name") {
         // Copilot: toolName. Gemini CLI / Antigravity: toolCall.name. Others: tool.
@@ -171,6 +183,8 @@ mod tests {
             ("permissionRequest", "PermissionRequest"),
             ("sessionEnd", "SessionEnd"),
             ("beforeSubmitPrompt", "UserPromptSubmit"),
+            ("beforeShellExecution", "PreToolUse"),
+            ("beforeMCPExecution", "PreToolUse"),
             ("postToolUseFailure", "PostToolUseFailure"),
             ("subagentStart", "SubagentStart"),
             ("subagentStop", "SubagentStop"),
@@ -223,6 +237,29 @@ mod tests {
         fields(&mut m, &no_env);
         assert_eq!(m["session_id"], "c-1");
         assert_eq!(m["cwd"], "/w/proj");
+    }
+
+    #[test]
+    fn cursor_permission_hook_payloads_normalize_for_the_decision_card() {
+        let mut shell = obj(json!({
+            "hook_event_name": "beforeShellExecution",
+            "command": "sudo apt update",
+            "cwd": "/workspace",
+        }));
+        fields(&mut shell, &no_env);
+        assert_eq!(event("beforeShellExecution"), "PreToolUse");
+        assert_eq!(shell["tool_name"], "Bash");
+        assert_eq!(shell["tool_input"]["command"], "sudo apt update");
+
+        let mut mcp = obj(json!({
+            "hook_event_name": "beforeMCPExecution",
+            "tool_name": "linear.create_issue",
+            "tool_input": { "title": "Test" },
+        }));
+        fields(&mut mcp, &no_env);
+        assert_eq!(event("beforeMCPExecution"), "PreToolUse");
+        assert_eq!(mcp["tool_name"], "linear.create_issue");
+        assert_eq!(mcp["tool_input"]["title"], "Test");
     }
 
     #[test]

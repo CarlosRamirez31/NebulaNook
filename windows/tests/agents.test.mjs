@@ -32,7 +32,6 @@ test("the agent tag is checked the Mac's way, and claude is reserved", () => {
   assert.equal(validateAgent("a".repeat(24)), "a".repeat(24));
 });
 
-test("approval cards are for the agents the relay answers, no one else", () => {
-  // Must match takes_decisions() in hook/src/reply.rs.
-  assert.deepEqual([...APPROVAL_AGENTS].sort(), ["codex", "copilot", "muse"]);
+test("all supported agents can show a correlated approval card", () => {
+  assert.deepEqual([...APPROVAL_AGENTS].sort(), ["amp", "antigravity", "claude-desktop", "codex", "copilot", "cursor", "gemini", "hermes", "muse", "opencode"]);
 });

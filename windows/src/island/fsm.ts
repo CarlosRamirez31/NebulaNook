@@ -102,6 +102,12 @@ export class IslandStateMachine {
     }
   }
 
+  /** Release a temporary alert pin and resume closing if the OS says the pointer is outside. */
+  releasePin(pointerOutside: boolean) {
+    this.pinned = false;
+    if (pointerOutside) this.mouseLeft();
+  }
+
   click() {
     this.byHover = false;
     if (this.state !== "petit") return;

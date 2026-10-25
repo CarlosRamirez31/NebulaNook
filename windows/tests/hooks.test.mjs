@@ -245,13 +245,55 @@ test("an agent's pill goes away when its session ends, or 5.2 s after it stops",
 });
 
 test("an agent's permission request is declined, never shown as Claude Code's", () => {
-  for (const agent of ["gemini", "antigravity", "cursor", "opencode", "amp", "hermes", "my-tool"]) {
+  for (const agent of ["my-tool"]) {
     calls.length = 0;
     hook({ hook_event_name: "PermissionRequest", request_id: "r1", coucou_agent: agent, tool_name: "Bash" });
     assert.deepEqual(sent("approval_decline"), [{ requestId: "r1" }], agent);
     assert.deepEqual(sent("approval_ack"), [], agent);
     assert.equal(State.pendingApproval, null, agent);
   }
+});
+
+test("pre-tool adapters and native permission hooks reach the same approval card", () => {
+  for (const agent of ["gemini", "antigravity", "cursor", "amp"]) {
+    calls.length = 0;
+    hook({ hook_event_name: "PermissionRequest", request_id: `r-${agent}`, session_id: "s1",
+      coucou_agent: agent, tool_name: "Bash", tool_input: { command: "sudo apt update" } });
+    assert.deepEqual(sent("approval_decline"), [], agent);
+    assert.deepEqual(sent("approval_ack"), [{ requestId: `r-${agent}` }], agent);
+    assert.equal(State.pendingApproval?.pillId, `agent_${agent}`, agent);
+    State.endApproval();
+    State.pendingApproval = null;
+  }
+});
+
+test("Claude Desktop's Claude Code requests use the shared approval card", () => {
+  calls.length = 0;
+  hook({ hook_event_name: "PermissionRequest", request_id: "r-desktop", coucou_agent: "claude-desktop",
+    tool_name: "Bash", tool_input: { command: "sudo apt update" } });
+  assert.deepEqual(sent("approval_decline"), []);
+  assert.deepEqual(sent("approval_ack"), [{ requestId: "r-desktop" }]);
+  assert.equal(State.pendingApproval?.pillId, "agent_claude-desktop");
+});
+
+test("OpenCode permission requests reach the shared Coucou approval card", () => {
+  calls.length = 0;
+  hook({ hook_event_name: "PermissionRequest", request_id: "r-opencode", session_id: "o1",
+    coucou_agent: "opencode", tool_name: "shell", tool_input: { command: "npm test" } });
+  assert.deepEqual(sent("approval_decline"), []);
+  assert.deepEqual(sent("approval_ack"), [{ requestId: "r-opencode" }]);
+  assert.equal(State.pendingApproval?.requestId, "r-opencode");
+  assert.equal(State.pendingApproval?.pillId, "agent_opencode");
+  assert.equal(State.pendingApproval?.command, "shell · npm test");
+});
+
+test("Hermes permission requests reach the shared Coucou approval card", () => {
+  calls.length = 0;
+  hook({ hook_event_name: "PermissionRequest", request_id: "r-hermes", session_id: "h1",
+    coucou_agent: "hermes", tool_name: "Terminal", tool_input: { command: "printf safe" } });
+  assert.deepEqual(sent("approval_decline"), []);
+  assert.deepEqual(sent("approval_ack"), [{ requestId: "r-hermes" }]);
+  assert.equal(State.pendingApproval?.requestId, "r-hermes");
 });
 
 test("Codex, Copilot CLI and Muse Code get the card on their own pill", () => {
@@ -356,9 +398,10 @@ test("a Claude Desktop session gets the Claude Desktop pill, in its colour (Mac 
   assert.equal(desktop.color, "#D97757");
   assert.equal(desktop.sessionId, "d1");
   assert.equal(task().state, "idle");
-  // Its permission requests are answered in the app, as on macOS.
+  // Its permission requests use the same Coucou approval card as the other agents.
   hook({ hook_event_name: "PermissionRequest", request_id: "r1", coucou_agent: "claude-desktop", tool_name: "Bash" });
-  assert.deepEqual(sent("approval_decline"), [{ requestId: "r1" }]);
+  assert.equal(State.pendingApproval?.requestId, "r1");
+  assert.deepEqual(sent("approval_ack"), [{ requestId: "r1" }]);
 });
 
 // ── Main tool and Cursor ──────────────────────────────────────────────────────
@@ -685,13 +728,13 @@ for (const [what, event] of [
   });
 }
 
-test("a declined permission request leaves the stop timer running", () => {
-  // An agent's request is declined without a card.
+test("an unsupported permission request leaves the stop timer running", () => {
+  // An agent without a decision adapter is declined without a card.
   afterStop(
     { hook_event_name: "PermissionRequest", request_id: "r1", tool_name: "Bash" },
-    { coucou_agent: "gemini" },
+    { coucou_agent: "my-tool" },
   );
-  assert.equal(task("agent_gemini"), undefined);
+  assert.equal(task("agent_my-tool"), undefined);
   // So is a second request while a card is already up.
   ask("r1");
   afterStop(() => ask("r2"));

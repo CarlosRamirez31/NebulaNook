@@ -1,18 +1,15 @@
 //! What the relay prints back to the agent — the only place that knows each
 //! agent's stdout contract. Same replies as the Mac relay (HookServer.swift).
 //!
-//! The one rule that matters: **nothing that allows anything is ever printed
-//! without a decision a human clicked.** With no decision the reply is silence,
-//! an empty `{}`, or Copilot's explicit "ask", and every agent then asks in its
-//! own terminal exactly as if Coucou were not installed.
+//! A permission allow is printed only after a human clicks Coucou. With no
+//! decision, an adapter either falls back to the agent's own permission policy
+//! or returns a denial; it never silently grants the pending operation.
 
 use serde_json::{json, Map, Value};
 
-/// The agents whose permission requests the island can answer: Claude Code
-/// (no `--agent`), Codex, Copilot CLI and Muse Code. Any decision for another
-/// agent is ignored here too, whatever the app sent.
+/// Agents with blocking adapters that can return an explicit human decision.
 pub fn takes_decisions(agent: &str) -> bool {
-    matches!(agent, "" | "codex" | "copilot" | "muse")
+    matches!(agent, "" | "codex" | "copilot" | "muse" | "opencode" | "gemini" | "antigravity" | "cursor" | "amp" | "hermes")
 }
 
 /// Agents that read a JSON object on stdout after every hook and get `{}` —
@@ -26,15 +23,41 @@ fn wants_json(agent: &str) -> bool {
 /// question as it was asked.
 pub fn stdout(agent: &str, event: &str, decision: Option<&str>, question: Option<&Value>) -> Option<String> {
     if event != "PermissionRequest" {
-        // Antigravity reads "{}" on PreToolUse as a denial. "ask" keeps its own prompt
-        // (and the user's Always Allow): Coucou never allows a tool by itself.
+        // Antigravity's "allow" delegates to its configured policy. Returning
+        // "ask" here would force a terminal approval on every PreToolUse.
         if agent.eq_ignore_ascii_case("antigravity") && event == "PreToolUse" {
-            return Some(r#"{"decision":"ask"}"#.to_string());
+            return Some(r#"{"decision":"allow"}"#.to_string());
         }
         return wants_json(agent).then(|| "{}".to_string());
     }
     let decision = decision.filter(|_| takes_decisions(agent));
     match agent {
+        // OpenCode's permission.evaluate plugin hook mutates its effect.
+        "opencode" => match decision.map(str::trim) {
+            Some("allow" | "always") => Some(r#"{"effect":"allow"}"#.to_string()),
+            Some("deny") => Some(r#"{"effect":"deny"}"#.to_string()),
+            _ => None,
+        },
+        "gemini" => match decision.map(str::trim) {
+            Some("allow" | "always") => Some(r#"{"decision":"allow"}"#.to_string()),
+            Some("deny") => Some(r#"{"decision":"deny","reason":"Denied from Coucou"}"#.to_string()),
+            _ => Some("{}".to_string()),
+        },
+        "antigravity" => match decision.map(str::trim) {
+            Some("allow" | "always") => Some(r#"{"decision":"auto_approve"}"#.to_string()),
+            Some("deny") => Some(r#"{"decision":"deny","reason":"Denied from Coucou"}"#.to_string()),
+            // No answer hands the request to Antigravity's native approval UI.
+            _ => Some(r#"{"decision":"ask"}"#.to_string()),
+        },
+        "cursor" => match decision.map(str::trim) {
+            Some("allow" | "always") => Some(r#"{"permission":"allow"}"#.to_string()),
+            Some("deny") => Some(r#"{"permission":"deny","user_message":"Denied from Coucou"}"#.to_string()),
+            _ => Some(r#"{"permission":"ask"}"#.to_string()),
+        },
+        "amp" | "hermes" => match decision.map(str::trim) {
+            Some("allow" | "always") => Some(r#"{"decision":"allow"}"#.to_string()),
+            Some("deny") | None | Some(_) => Some(r#"{"decision":"deny"}"#.to_string()),
+        },
         // Copilot CLI and Muse Code read a bare permissionDecision. Copilot is
         // fail-closed: it must always get valid JSON, so silence is an "ask".
         "copilot" | "muse" => {
@@ -143,13 +166,20 @@ mod tests {
     ];
 
     /// Whatever a reply says, does it let anything through?
-    fn allows(out: &str) -> bool {
+    fn allows(out: &str, agent: &str, event: &str) -> bool {
         let v: Value = serde_json::from_str(out).expect("every reply is JSON");
-        let text = v.to_string();
-        // Any decision counts as one, except "ask" (Antigravity's PreToolUse): that hands the
-        // choice back to the agent's own prompt.
-        let decided = v.get("decision").map_or(false, |d| d.as_str() != Some("ask"));
-        text.contains("allow") || decided || v.get("permission").is_some() || v.get("continue").is_some()
+        let decision = v.get("decision").and_then(Value::as_str);
+        let permission = v.get("permission").and_then(Value::as_str);
+        // Antigravity "allow" delegates to its policy; it is not a Coucou grant.
+        if agent == "antigravity" && event == "PreToolUse" && decision == Some("allow") {
+            return false;
+        }
+        decision.is_some_and(|d| matches!(d, "allow" | "auto_approve"))
+            || permission == Some("allow")
+            || v.get("effect").and_then(Value::as_str) == Some("allow")
+            || v.get("permissionDecision").and_then(Value::as_str) == Some("allow")
+            || v.get("hookSpecificOutput").and_then(|h| h.get("decision")).and_then(|d| d.get("behavior")).and_then(Value::as_str) == Some("allow")
+            || v.get("continue").and_then(Value::as_bool) == Some(true)
     }
 
     #[test]
@@ -157,12 +187,12 @@ mod tests {
         for agent in AGENTS {
             for event in EVENTS {
                 if let Some(out) = stdout(agent, event, None, None) {
-                    assert!(!allows(&out), "{agent:?} {event} printed {out} with nobody clicking");
+                    assert!(!allows(&out, agent, event), "{agent:?} {event} printed {out} with nobody clicking");
                 }
                 // A decline, a timeout or garbage from the app is no decision either.
                 for not_a_decision in ["", "ask", "maybe", "{\"permissionDecision\":\"allow\"}"] {
                     if let Some(out) = stdout(agent, event, Some(not_a_decision), None) {
-                        assert!(!allows(&out), "{agent:?} {event} {not_a_decision:?} printed {out}");
+                        assert!(!allows(&out, agent, event), "{agent:?} {event} {not_a_decision:?} printed {out}");
                     }
                 }
             }
@@ -174,11 +204,11 @@ mod tests {
         for agent in AGENTS {
             for event in EVENTS.iter().filter(|e| **e != "PermissionRequest") {
                 if let Some(out) = stdout(agent, event, Some("allow"), None) {
-                    assert!(!allows(&out), "{agent:?} {event}: {out}");
+                    assert!(!allows(&out, agent, event), "{agent:?} {event}: {out}");
                 }
             }
             let out = stdout(agent, "PermissionRequest", Some("allow"), None);
-            assert_eq!(out.as_deref().is_some_and(allows), takes_decisions(agent), "{agent:?}: {out:?}");
+            assert_eq!(out.as_deref().is_some_and(|out| allows(out, agent, "PermissionRequest")), takes_decisions(agent), "{agent:?}: {out:?}");
         }
     }
 
@@ -201,9 +231,16 @@ mod tests {
         // Copilot is fail-closed: no decision is an explicit "ask", never silence.
         assert_eq!(stdout("copilot", "PermissionRequest", None, None).unwrap(), r#"{"permissionDecision":"ask"}"#);
         assert_eq!(stdout("muse", "PermissionRequest", None, None), None);
-        // Antigravity needs a decision on PreToolUse: "ask" leaves it to Antigravity's own prompt;
-        // other lifecycle events receive "{}".
-        assert_eq!(stdout("antigravity", "PreToolUse", None, None).unwrap(), r#"{"decision":"ask"}"#);
+        // Antigravity's normal hook delegates to its configured policy; a real
+        // card decision uses auto_approve/deny and avoids a second terminal prompt.
+        assert_eq!(stdout("antigravity", "PreToolUse", None, None).unwrap(), r#"{"decision":"allow"}"#);
+        assert_eq!(stdout("antigravity", "PermissionRequest", Some("allow"), None).unwrap(), r#"{"decision":"auto_approve"}"#);
+        assert_eq!(stdout("antigravity", "PermissionRequest", Some("deny"), None).unwrap(), r#"{"decision":"deny","reason":"Denied from Coucou"}"#);
+        assert_eq!(stdout("cursor", "PermissionRequest", Some("allow"), None).unwrap(), r#"{"permission":"allow"}"#);
+        assert_eq!(stdout("cursor", "PermissionRequest", Some("deny"), None).unwrap(), r#"{"permission":"deny","user_message":"Denied from Coucou"}"#);
+        assert_eq!(stdout("gemini", "PermissionRequest", Some("deny"), None).unwrap(), r#"{"decision":"deny","reason":"Denied from Coucou"}"#);
+        assert_eq!(stdout("amp", "PermissionRequest", Some("allow"), None).unwrap(), r#"{"decision":"allow"}"#);
+        assert_eq!(stdout("hermes", "PermissionRequest", Some("allow"), None).unwrap(), r#"{"decision":"allow"}"#);
         for event in ["PostToolUse", "UserPromptSubmit", "Stop"] {
             assert_eq!(stdout("antigravity", event, None, None).unwrap(), "{}");
         }
@@ -215,8 +252,13 @@ mod tests {
         for event in ["PreToolUse", "UserPromptSubmit", "Stop"] {
             assert_eq!(stdout("cursor", event, None, None), None);
         }
-        // Hermes approvals are not supported: its decisions are never relayed.
-        assert_eq!(stdout("hermes", "PermissionRequest", Some("allow"), None), None);
+        // OpenCode's plugin asks the relay only after its permission engine says "ask".
+        assert_eq!(stdout("opencode", "PermissionRequest", Some("allow"), None).unwrap(), r#"{"effect":"allow"}"#);
+        assert_eq!(stdout("opencode", "PermissionRequest", Some("deny"), None).unwrap(), r#"{"effect":"deny"}"#);
+        assert_eq!(stdout("opencode", "PermissionRequest", None, None), None);
+        // The generated Hermes plugin consumes a request-bound decision reply.
+        assert_eq!(stdout("hermes", "PermissionRequest", Some("allow"), None).unwrap(), r#"{"decision":"allow"}"#);
+        assert_eq!(stdout("hermes", "PermissionRequest", None, None).unwrap(), r#"{"decision":"deny"}"#);
     }
 
     #[test]

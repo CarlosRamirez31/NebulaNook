@@ -1,5 +1,11 @@
 # Coucou — third-party agent integration
 
+## Privacy constraint
+
+Do not add telemetry, analytics, crash reporting, or automatic usage data sent
+to external services. Network traffic must remain limited to services the user
+configures or explicitly enables for a feature.
+
 Any tool that can write to a Unix domain socket (macOS, Linux) or a named pipe (Windows) can send events to Coucou and have its own pill next to Claude Code.
 
 ## The `coucou_agent` field
@@ -73,11 +79,15 @@ Send newline-terminated JSON to the socket:
 
 ## Supported events
 
-All standard Claude Code hook events are supported, **except `PermissionRequest`**:
-approval cards are not yet implemented for third-party agents (only Claude Code gets
-one). A `PermissionRequest` from an external agent is answered immediately with no
-decision, so the relay writes nothing and the agent re-asks in its terminal.
-Approval support for other agents will be added with Codex support.
+Approval cards use one request-bound Coucou decision. Claude Code, Codex,
+Copilot CLI, Muse Code, OpenCode and Hermes use their native blocking permission
+APIs. Gemini CLI, Antigravity, Cursor and Amp have no callback that reports the
+native policy's pending prompt; their adapter gates risky shell commands and
+file/MCP mutations before execution. Routine reads and unclassified commands
+continue through the agent's own policy. The decision is returned using that
+agent's response contract, and failures fall back to its native policy or deny
+where the adapter is fail-closed. No adapter auto-approves without a Coucou
+click.
 
 The pill lifecycle:
 
@@ -118,7 +128,7 @@ Coucou events automatically.
 
 | Gemini CLI event | Canonical event |
 |---|---|
-| `BeforeTool` | `PreToolUse` |
+| `BeforeTool` | `PreToolUse`, with a Coucou card for risky commands and file mutations |
 | `AfterTool` | `PostToolUse` |
 | `BeforeAgent` | `UserPromptSubmit` |
 | `AfterAgent` | `Stop` |
@@ -135,7 +145,7 @@ island's `tool_name` / `session_id`.
 | Antigravity event | Canonical event |
 |---|---|
 | `PreInvocation` | `UserPromptSubmit` |
-| `PreToolUse` | `PreToolUse` |
+| `PreToolUse` | `PreToolUse` or a correlated Coucou approval for risky mutations |
 | `PostToolUse` | `PostToolUse` |
 | `PostInvocation` | `PostToolUse` |
 | `Stop` | `Stop` |
@@ -180,7 +190,7 @@ Muse uses PascalCase event names. Coucou shows a real Allow / Deny card for Muse
 
 Coucou supports OpenCode via **Settings → OpenCode Plugin → Install plugin**.
 The installer writes a JS plugin to `~/.config/opencode/plugins/coucou.js`.
-The plugin maps OpenCode event types to canonical Coucou names and forwards them fire-and-forget; OpenCode is never blocked.
+The plugin maps lifecycle events and registers `permission.evaluate`. It waits only when OpenCode's permission engine has already set `effect: "ask"`, then returns the Coucou choice to that same decision. If Coucou is unavailable, OpenCode keeps its native prompt.
 
 | OpenCode event | Canonical event |
 |---|---|
@@ -190,13 +200,13 @@ The plugin maps OpenCode event types to canonical Coucou names and forwards them
 | `session.deleted` | `SessionEnd` |
 | `tool.execute.before` | `PreToolUse` |
 | `tool.execute.after` | `PostToolUse` |
-| `permission.asked` | `PermissionRequest` |
+| `permission.evaluate` (`effect: "ask"`) | `PermissionRequest` (blocking; returns allow/deny) |
 
 ### Amp (macOS)
 
 Coucou supports Amp via **Settings → Amp Plugin → Install plugin**.
 The installer writes a TypeScript plugin to `~/.config/amp/plugins/coucou.ts`.
-The `tool.call` handler returns `{ action: 'allow' }` so Amp always proceeds; all events are forwarded display-only.
+The `tool.call` handler sends risky shell commands and file mutations through the Coucou card. A denial returns `reject-and-continue`; routine calls continue through Amp.
 
 | Amp event | Canonical event |
 |---|---|
@@ -211,17 +221,16 @@ The `tool.call` handler returns `{ action: 'allow' }` so Amp always proceeds; al
 Coucou supports Hermes via **Settings → Agents → Hermes → Install plugin**.
 The installer writes a Python plugin to `~/.hermes/plugins/coucou/` and enables it in
 `~/.hermes/config.yaml`. The plugin uses `on_session_start` (sends the platform when running
-via the gateway), `post_llm_call` (sends the final response), and a `pre_approval_request`
-observer hook that fires a `⏳ Approval pending in Hermes` step in the notch.
-Approving from the notch requires `register_approval_transport`, which is not yet available
-in Hermes 0.15.x; the Approvals toggle activates automatically once Hermes exposes it.
-Every event is fire-and-forget: if the app is closed or unreachable, nothing is sent and Hermes carries on, handling approvals itself.
+via the gateway), and `post_llm_call` (sends the final response). Its
+`register_approval_transport` handler sends the actual `ApprovalRequest` through
+the local relay, waits for the Coucou card, then responds `once` or `deny` to
+that request. Failure to reach Coucou denies the pending request.
 
 | Hermes event | Canonical event |
 |---|---|
 | `on_session_start` | `SessionStart` |
 | `post_llm_call` | `Stop` |
-| `pre_approval_request` | `PreToolUse` (observer only, shows "⏳ Approval pending in Hermes") |
+| `register_approval_transport` | `PermissionRequest` (waits for Coucou, then returns `once`/`deny`) |
 
 ### Any other tool
 

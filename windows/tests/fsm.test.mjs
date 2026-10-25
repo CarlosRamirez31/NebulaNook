@@ -113,6 +113,24 @@ test("a pinned island stays open when the mouse leaves", () => {
   assert.equal(fsm.state, "home");
 });
 
+test("releasing an alert pin resumes auto-close when Linux reports the pointer outside", () => {
+  fsm.forceHome();
+  fsm.pinned = true;
+  fsm.releasePin(true);
+  assert.notEqual(fsm.homeCollapseDueAt, null);
+  seconds(15);
+  assert.equal(fsm.state, "petit");
+});
+
+test("releasing an alert pin does not close while the pointer is still inside", () => {
+  fsm.forceHome();
+  fsm.pinned = true;
+  fsm.releasePin(false);
+  assert.equal(fsm.homeCollapseDueAt, null);
+  seconds(20);
+  assert.equal(fsm.state, "home");
+});
+
 test("the collapse delay is the configured one", () => {
   fsm.homeToPetitDelay = 5;
   fsm.forceHome();

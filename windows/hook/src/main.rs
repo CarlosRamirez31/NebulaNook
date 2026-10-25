@@ -174,7 +174,12 @@ fn prepare(raw: &[u8], args: &Args, env: &dyn Fn(&str) -> Option<String>, cwd: &
         .map(str::to_string)
         .unwrap_or_else(|| args.event.clone());
     normalize::fields(map, env);
-    let name = normalize::refine(normalize::event(&raw_event), map);
+    let canonical = normalize::refine(normalize::event(&raw_event), map);
+    let name = if approval_candidate(&args.agent, &raw_event, map) {
+        "PermissionRequest".to_string()
+    } else {
+        canonical
+    };
     map.insert("hook_event_name".into(), Value::String(name.clone()));
 
     for field in DROPPED_FIELDS {
@@ -200,6 +205,29 @@ fn prepare(raw: &[u8], args: &Args, env: &dyn Fn(&str) -> Option<String>, cwd: &
     let mut line = payload.to_string();
     line.push('\n');
     Some(Event { line, name, question })
+}
+
+/// Only gate operations likely to hit a native permission prompt. Agents with
+/// a real permission callback (e.g. OpenCode) use that callback instead.
+fn approval_candidate(agent: &str, event: &str, payload: &Map<String, Value>) -> bool {
+    if !matches!(event, "BeforeTool" | "PreToolUse" | "beforeShellExecution" | "beforeMCPExecution") {
+        return false;
+    }
+    let tool = payload.get("tool_name").and_then(Value::as_str).unwrap_or_default().to_ascii_lowercase();
+    let input = payload.get("tool_input").and_then(Value::as_object);
+    let command = input.and_then(|i| i.get("command")).and_then(Value::as_str).unwrap_or_default().to_ascii_lowercase();
+    let risky_command = ["sudo ", "rm -rf", "git push", "git reset --hard", "git clean -f", "chmod ", "chown ", "mkfs", "dd if=", "curl ", "wget ", "npm install", "pnpm add", "pip install", "cargo install"]
+        .iter().any(|needle| command.contains(needle));
+    let mutation = ["write_file", "edit_file", "replace_file_content", "write_to_file", "delete_file", "create_file", "edit", "write", "multiedit"]
+        .iter().any(|needle| tool.contains(needle));
+    let mcp_mutation = event == "beforeMCPExecution" && ["write", "edit", "delete", "update", "execute", "run"]
+        .iter().any(|needle| tool.contains(needle));
+    match agent {
+        "gemini" => risky_command || mutation,
+        "antigravity" => risky_command || mutation,
+        "cursor" => risky_command || mcp_mutation,
+        _ => false,
+    }
 }
 
 /// Which terminal the session runs in. Unlike macOS, Coucou here accepts events
@@ -481,7 +509,7 @@ mod tests {
         assert!(v["tool_input"]["old_string"].as_str().unwrap().len() <= MAX_FIELD_LEN + 4);
         let raw = format!(r#"{{"hook_event_name":"BeforeTool","tool_name":"Edit","tool_input":{{"content":"{big}"}}}}"#);
         let (v, ev) = run(&raw, "gemini", "");
-        assert_eq!(ev.name, "PreToolUse");
+        assert_eq!(ev.name, "PermissionRequest");
         assert!(v["tool_input"]["content"].as_str().unwrap().len() <= MAX_FIELD_LEN + 4);
     }
 

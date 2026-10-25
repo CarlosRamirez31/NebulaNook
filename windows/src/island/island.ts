@@ -517,9 +517,12 @@ export class Island {
 
   /** An alert stopped waiting for an answer: let the island auto-close again. */
   dropPin() {
-    this.fsm.pinned = false;
-    // The countdown the pin held back starts now, if the mouse is elsewhere.
-    if (!this.wasInIsland) this.fsm.mouseLeft();
+    // On Linux, WebKitGTK can leave `wasInIsland` stale after an approval card
+    // pins the island. The native pointer watch is authoritative when it says
+    // the pointer has left; reconcile before resuming the close timer.
+    const pointerOutside = this.pointerInside === false || !this.wasInIsland;
+    if (this.pointerInside === false) this.wasInIsland = false;
+    this.fsm.releasePin(pointerOutside);
   }
 
   // ── Keyboard shortcuts (island/shortcuts.ts) ────────────────────────────────

@@ -475,9 +475,8 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
 
     case "PermissionRequest": {
-      // Only Claude Code and the agents the relay can answer for (Codex, Copilot
-      // CLI, Muse Code — same as the Mac) get a card. Anyone else's request is
-      // declined at once, so the agent asks in its own terminal.
+      // Only Claude Code and agents with a blocking decision adapter get a
+      // card. Other events are declined so the agent retains its native prompt.
       if (isExternalAgent && !APPROVAL_AGENTS.has(validAgent!)) {
         if (payload.request_id) void Bridge.approvalDecline(payload.request_id);
         break;
@@ -517,8 +516,8 @@ function handleHook(island: Island, payload: HookPayload) {
       if (requestId) void Bridge.approvalAck(requestId);
       State.updateTask(agentId, view);
       Sound.play(view);
-      // Any agent's card (Claude Code, Codex, Copilot CLI, Muse Code) comes up
-      // the same way: beginApproval brought its pill to the front.
+      // Every supported agent's card comes up the same way: beginApproval
+      // brought its pill to the front.
       island.alert(view);
       // Coucou answers within 108 s or not at all; after that the terminal has
       // taken over and the card would be lying.
