@@ -215,6 +215,11 @@ pub fn relay_socket_path() -> Option<PathBuf> {
 
 // ── Who we are ────────────────────────────────────────────────────────────────
 
+/// The current account's login name from the desktop session.
+pub fn user_login_name() -> Option<String> {
+    std::env::var("USER").ok().filter(|name| !name.trim().is_empty())
+}
+
 /// The account's full name: the first field of the passwd GECOS entry
 /// ("Louis Raille,,,"), or nothing when it is unset.
 pub fn user_full_name() -> Option<String> {

@@ -222,6 +222,11 @@ extern "system" {
 /// EXTENDED_NAME_FORMAT::NameDisplay.
 const NAME_DISPLAY: i32 = 3;
 
+/// The current Windows account's login name.
+pub fn user_login_name() -> Option<String> {
+    std::env::var("USERNAME").ok().filter(|name| !name.trim().is_empty())
+}
+
 /// The account's display name ("Louis Raille"): the directory's for a domain
 /// or Entra account, else the local account's "Full name", else nothing.
 pub fn user_full_name() -> Option<String> {

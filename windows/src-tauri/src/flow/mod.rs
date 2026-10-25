@@ -451,7 +451,7 @@ pub struct FlowStatus {
     platform: &'static str,
     /// Coucou started with the computer.
     autostarted: bool,
-    /// The user's first name, for "Hello Louis".
+    /// The operating-system login name, for the dictation greeting.
     user_name: Option<String>,
 }
 
@@ -468,9 +468,7 @@ pub fn flow_status(flow: State<Arc<Flow>>) -> FlowStatus {
         mics: audio::input_devices(),
         platform: if cfg!(windows) { "windows" } else { "linux" },
         autostarted: crate::launched_at_login(),
-        user_name: crate::platform::user_full_name()
-            .and_then(|n| n.split_whitespace().next().map(String::from))
-            .filter(|n| !n.is_empty()),
+        user_name: crate::platform::user_login_name(),
     }
 }
 
