@@ -5,17 +5,18 @@ name: Windows CI
 # which only runs on tags.
 
 on:
-  pull_request:
-    paths:
-      - 'windows/**'
-      - 'scripts/test-whats-new.py'
-      - '.github/workflows/windows-ci.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'windows/**'
-      - '.github/workflows/windows-ci.yml'
-
+  # Automatic triggers paused while this fork targets Linux desktop only.
+  # pull_request:
+  #   paths:
+  #     - windows/**
+  #     - scripts/test-whats-new.py
+  #     - .github/workflows/windows-ci.yml
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - windows/**
+  #     - .github/workflows/windows-ci.yml
+  workflow_dispatch:
 permissions:
   contents: read
 
