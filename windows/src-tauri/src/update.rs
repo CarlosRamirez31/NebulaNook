@@ -5,7 +5,7 @@
 // (again a day later at most if the card was left unanswered), or Settings →
 // General → Updates. "Check now" is a click, so it works either way. Once
 // allowed, Coucou looks at launch and every 6 hours: one unauthenticated
-// `GET /repos/Louis-CFM/coucou/releases`, no cookies, nothing about the user.
+// `GET /repos/CarlosRamirez31/NebulaNook/releases`, no cookies, nothing about the user.
 //
 // Windows: the installer this copy came from — the per-user setup.exe in
 // %LOCALAPPDATA%\Coucou, the per-machine .msi under Program Files — is
@@ -29,9 +29,9 @@ use tauri::{AppHandle, Emitter};
 use crate::i18n::t;
 use crate::island::WINDOW_LABEL;
 
-pub const RELEASES_URL: &str = "https://api.github.com/repos/Louis-CFM/coucou/releases?per_page=30";
+pub const RELEASES_URL: &str = "https://api.github.com/repos/CarlosRamirez31/NebulaNook/releases?per_page=30";
 /// Where "What's new" goes when no release is known.
-pub const RELEASES_PAGE: &str = "https://github.com/Louis-CFM/coucou/releases";
+pub const RELEASES_PAGE: &str = "https://github.com/CarlosRamirez31/NebulaNook/releases";
 
 /// This platform's release tags: `windows-vX.Y.Z` / `linux-vX.Y.Z`. Never the
 /// rolling `windows-latest` / `linux-latest`, nor the Mac's `v…` or Android's.
@@ -804,51 +804,57 @@ pub fn update_open_page() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn release_source_is_the_personal_fork() {
+        assert_eq!(RELEASES_URL, "https://api.github.com/repos/CarlosRamirez31/NebulaNook/releases?per_page=30");
+        assert_eq!(RELEASES_PAGE, "https://github.com/CarlosRamirez31/NebulaNook/releases");
+    }
+
     /// A trimmed `GET /releases` answer, as GitHub gave it on 2026-10-20: Mac,
     /// Linux, Android and Windows releases mixed, the rolling `*-latest` ones,
     /// drafts and a prerelease.
     fn fixture() -> Vec<u8> {
         serde_json::json!([
             { "tag_name": "windows-v0.6.0", "draft": true, "prerelease": false,
-              "html_url": "https://github.com/Louis-CFM/coucou/releases/tag/windows-v0.6.0", "assets": [] },
+              "html_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/tag/windows-v0.6.0", "assets": [] },
             { "tag_name": "windows-v0.7.0", "draft": false, "prerelease": true,
-              "html_url": "https://github.com/Louis-CFM/coucou/releases/tag/windows-v0.7.0", "assets": [] },
+              "html_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/tag/windows-v0.7.0", "assets": [] },
             { "tag_name": "v0.9.0", "draft": false, "prerelease": false,
-              "html_url": "https://github.com/Louis-CFM/coucou/releases/tag/v0.9.0",
+              "html_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/tag/v0.9.0",
               "body": "## What's new\n\n- **WhatsApp in one click** — Mac",
               "assets": [{ "name": "Coucou.zip", "size": 34228988,
-                "browser_download_url": "https://github.com/Louis-CFM/coucou/releases/download/v0.9.0/Coucou.zip",
+                "browser_download_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/download/v0.9.0/Coucou.zip",
                 "digest": "sha256:24175a765704082c8b2e751f8b5ccb76b1eb3440ff2fd1e9c4cbe780c2193baa" }] },
             { "tag_name": "windows-v0.5.0", "draft": false, "prerelease": false,
-              "html_url": "https://github.com/Louis-CFM/coucou/releases/tag/windows-v0.5.0",
+              "html_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/tag/windows-v0.5.0",
               "body": "Coucou for Windows 0.5.0 — Mochi at the top of your screen.\n\n## What's new\n\n- **Flow dictation** on Windows — hold right Ctrl\n- Other things",
               "assets": [
                 { "name": "Coucou-Windows-0.5.0-setup.exe", "size": 10950620,
-                  "browser_download_url": "https://github.com/Louis-CFM/coucou/releases/download/windows-v0.5.0/Coucou-Windows-0.5.0-setup.exe",
+                  "browser_download_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/download/windows-v0.5.0/Coucou-Windows-0.5.0-setup.exe",
                   "digest": "sha256:e8234a092e8fe1bf6eed0395e6db13052be8fe47413949c2b7fa368467342337" },
                 { "name": "Coucou-Windows-0.5.0.msi", "size": 14086144,
-                  "browser_download_url": "https://github.com/Louis-CFM/coucou/releases/download/windows-v0.5.0/Coucou-Windows-0.5.0.msi",
+                  "browser_download_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/download/windows-v0.5.0/Coucou-Windows-0.5.0.msi",
                   "digest": "sha256:79bced83c414722e84d47e99005a37910147624dc5e4edf55aa66ff6462cd09f" }] },
             { "tag_name": "windows-latest", "draft": false, "prerelease": false,
-              "html_url": "https://github.com/Louis-CFM/coucou/releases/tag/windows-latest",
+              "html_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/tag/windows-latest",
               "assets": [{ "name": "Coucou-Windows-setup.exe", "size": 10950620,
-                "browser_download_url": "https://github.com/Louis-CFM/coucou/releases/download/windows-latest/Coucou-Windows-setup.exe",
+                "browser_download_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/download/windows-latest/Coucou-Windows-setup.exe",
                 "digest": "sha256:e8234a092e8fe1bf6eed0395e6db13052be8fe47413949c2b7fa368467342337" }] },
             { "tag_name": "linux-v0.5.0", "draft": false, "prerelease": false,
-              "html_url": "https://github.com/Louis-CFM/coucou/releases/tag/linux-v0.5.0", "body": "Coucou for Linux 0.5.0",
+              "html_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/tag/linux-v0.5.0", "body": "Coucou for Linux 0.5.0",
               "assets": [{ "name": "Coucou-Linux-0.5.0-x86_64.AppImage", "size": 107960824,
-                "browser_download_url": "https://github.com/Louis-CFM/coucou/releases/download/linux-v0.5.0/Coucou-Linux-0.5.0-x86_64.AppImage",
+                "browser_download_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/download/linux-v0.5.0/Coucou-Linux-0.5.0-x86_64.AppImage",
                 "digest": "sha256:b59e0a8e432b782ea029cc825d37675033e7ff4069d70d376c1d268495a242af" }] },
             { "tag_name": "linux-latest", "draft": false, "prerelease": false,
-              "html_url": "https://github.com/Louis-CFM/coucou/releases/tag/linux-latest", "assets": [] },
+              "html_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/tag/linux-latest", "assets": [] },
             { "tag_name": "android-v0.2.0", "draft": false, "prerelease": false,
-              "html_url": "https://github.com/Louis-CFM/coucou/releases/tag/android-v0.2.0", "assets": [] },
+              "html_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/tag/android-v0.2.0", "assets": [] },
             { "tag_name": "windows-v0.10.0", "draft": false, "prerelease": false,
               "html_url": "https://evil.example.com/windows-v0.10.0", "assets": [] },
             { "tag_name": "windows-v0.4.0", "draft": false, "prerelease": false,
-              "html_url": "https://github.com/Louis-CFM/coucou/releases/tag/windows-v0.4.0", "assets": [] },
+              "html_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/tag/windows-v0.4.0", "assets": [] },
             { "tag_name": "linux-v0.4.0", "draft": false, "prerelease": false,
-              "html_url": "https://github.com/Louis-CFM/coucou/releases/tag/linux-v0.4.0", "assets": [] }
+              "html_url": "https://github.com/CarlosRamirez31/NebulaNook/releases/tag/linux-v0.4.0", "assets": [] }
         ])
         .to_string()
         .into_bytes()
@@ -881,7 +887,7 @@ mod tests {
         // Not the draft 0.6.0, the prerelease 0.7.0, the Mac's 0.9.0 or the 0.10.0 whose page isn't GitHub's.
         assert_eq!(w.version, "0.5.0");
         assert_eq!(w.tag, "windows-v0.5.0");
-        assert_eq!(w.page_url, "https://github.com/Louis-CFM/coucou/releases/tag/windows-v0.5.0");
+        assert_eq!(w.page_url, "https://github.com/CarlosRamirez31/NebulaNook/releases/tag/windows-v0.5.0");
         assert_eq!(w.headline.as_deref(), Some("Flow dictation"));
         assert_eq!(w.assets.len(), 2);
         let l = latest(&fixture(), "linux-v").unwrap();
@@ -915,8 +921,8 @@ mod tests {
             assert!(!allowed_host(Some(host)), "{host}");
         }
         assert!(!allowed_host(None));
-        assert!(allowed_url("https://github.com/Louis-CFM/coucou/releases/download/x/y.msi"));
-        assert!(!allowed_url("http://github.com/Louis-CFM/coucou"));
+        assert!(allowed_url("https://github.com/CarlosRamirez31/NebulaNook/releases/download/x/y.msi"));
+        assert!(!allowed_url("http://github.com/CarlosRamirez31/NebulaNook"));
         assert!(!allowed_url("file:///C:/Windows/notepad.exe"));
         assert!(!allowed_url("not a url"));
     }
