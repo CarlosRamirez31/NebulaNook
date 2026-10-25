@@ -161,6 +161,7 @@ test("selecting another tab releases hover-only closing while preserving the run
 });
 
 test("the small preview expands explicitly and Home returns to the small size without losing history", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
   State.settings = { ...DEFAULT_SETTINGS };
   State.tasks = [];
   State.loadIntegrationTasks();
@@ -172,11 +173,17 @@ test("the small preview expands explicitly and Home returns to the small size wi
   State.activityExpanded = false;
   const island = Object.create(Island.prototype);
   island.fsm = new IslandStateMachine();
-  island.fsm.forceHome();
+  island.fsm.openOnHover = true;
+  island.fsm.mouseEntered();
   island.animateGeometry = () => {};
+  State.mode = "expanded";
   assert.equal(island.targetSize().h, 168);
   island.expandActivity();
   assert.equal(State.activityExpanded, true);
+  assert.equal(island.fsm.openedByHover, false, "clicking the preview releases the fast hover close");
+  island.fsm.mouseLeft();
+  mock.timers.tick(600);
+  assert.equal(island.fsm.state, "home", "the editor survives movement to its edge controls");
   assert.equal(island.targetSize().h, 316);
   island.showFileDiff = () => {};
   island.setView("prompt");
@@ -186,4 +193,5 @@ test("the small preview expands explicitly and Home returns to the small size wi
   assert.equal(island.targetSize().h, 168);
   assert.deepEqual(State.focusTask.history, ["Edit · notes.md"]);
   island.fsm.cancelTimers();
+  mock.timers.reset();
 });

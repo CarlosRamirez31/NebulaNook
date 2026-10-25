@@ -39,7 +39,7 @@ const CLAUDE_DESKTOP_ID = "agent_claude-desktop";
 /** Extra canvas on each side of Mochi, for the witch hat's brim and the Santa hat's tip. */
 const BOT_SIDE = 24;
 /** Same margin as the Rust hit test (src-tauri/src/island.rs). */
-const HIT_MARGIN = 14;
+const HIT_MARGIN = 40;
 
 /** The three views the drop sequence owns; leaving them stops the engine. */
 const UPLOAD_VIEWS: ReadonlySet<IslandViewName> = new Set(["upload", "uploading", "choose"]);
@@ -602,6 +602,7 @@ export class Island {
   /** The small preview expands only when the user asks to inspect it. */
   expandActivity() {
     if (State.pendingApproval) return;
+    this.fsm.userInteracted();
     State.activityExpanded = true;
     this.expand("overview");
   }
@@ -828,9 +829,9 @@ export class Island {
       Sound.resume();
       State.lastActivity = performance.now();
       const ptr = this.designPointer(e);
-      // A click makes a hover-opened island an ordinary open one.
-      // Inspecting an activity preview must still close it when the mouse leaves.
-      if (!this.fsm.openedByHover || !State.tasks.some(hasSessionTicker)) this.fsm.userInteracted();
+      // Any explicit click ends hover-only closing, even while an agent is
+      // active, so edge controls remain reachable while the pointer moves.
+      this.fsm.userInteracted();
       // A press on Mochi may become a drag out to the desktop.
       if (e.button === 0 && this.isBotHit(ptr.x, ptr.y)) {
         this.botPress = { x: ptr.x, y: ptr.y };

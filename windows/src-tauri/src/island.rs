@@ -24,9 +24,9 @@ pub const STRIP_H: f64 = 6.0 * UI_SCALE;
 
 pub const WINDOW_LABEL: &str = "island";
 
-/// Margin around the island that still counts as "on the island", in logical px.
-/// Wider than the macOS 6 pt because a click must never be swallowed.
-const HIT_MARGIN: f64 = 14.0 * UI_SCALE;
+/// Design-CSS margin for the transparent side gutters of the full panel.
+/// Rust scales it natively so the edge controls stay reachable while moving.
+const HIT_MARGIN: f64 = 40.0 * UI_SCALE;
 
 #[derive(Serialize, Clone)]
 /// Cursor position in the page's design-CSS coordinates.
