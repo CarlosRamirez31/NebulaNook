@@ -176,7 +176,7 @@ fn set_collapsed(app: AppHandle, shared: State<Shared>, collapsed: bool) {
 /// The front end pushes the island shape; Rust decides click-through from it.
 #[tauri::command]
 fn set_island_rect(app: AppHandle, shared: State<Shared>, x: f64, y: f64, width: f64, height: f64) {
-    shared.gate.set_rect(island::IslandRect { x, y, w: width, h: height });
+    shared.gate.set_rect(island::IslandRect::from_css(x, y, width, height));
     // Without the cursor poll the input region is the click-through: it follows the island.
     if !platform::CURSOR_POLL {
         island::refresh_click_through(&app, &shared.gate);
@@ -199,18 +199,21 @@ fn reposition(app: AppHandle, shared: State<Shared>) {
     island::apply_geometry(&app, &pref, collapsed);
 }
 
-/// The panel is laid out in CSS px against the window's own scale. If the webview
-/// reports a different devicePixelRatio (it ends up bigger than the window and gets
-/// cut), correct its zoom so one CSS px is one logical px again.
+/// Keep the design coordinates while enlarging the panel and all its contents.
+/// Correct for display DPI as well so native input regions match the page zoom.
 #[tauri::command]
-fn fit_zoom(app: AppHandle, dpr: f64) -> bool {
+fn fit_zoom(app: AppHandle, viewport_width: f64) -> bool {
     let Some(win) = island::window(&app) else { return false };
-    let scale = win.scale_factor().unwrap_or(1.0);
+    let scale = win.scale_factor().unwrap_or(1.0) * island::UI_SCALE;
+    let Ok(size) = win.inner_size() else { return false };
+    // WebKit does not consistently include page zoom in devicePixelRatio.
+    // Measure the actual CSS viewport instead, on every supported webview.
+    let dpr = size.width as f64 / viewport_width;
     static ZOOM: std::sync::Mutex<f64> = std::sync::Mutex::new(1.0);
     let mut zoom = ZOOM.lock().unwrap();
     if let Some(new_zoom) = island::calculate_zoom_correction(*zoom, scale, dpr) {
         *zoom = new_zoom;
-        log::line(format!("webview dpr {dpr} != window scale {scale} — setting zoom {new_zoom:.3}"));
+        log::line(format!("webview dpr {dpr} != target scale {scale} — setting zoom {new_zoom:.3}"));
         let _ = win.set_zoom(new_zoom);
         true
     } else {

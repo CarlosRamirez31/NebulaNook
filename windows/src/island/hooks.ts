@@ -6,9 +6,10 @@
 // Code's (hook/src/normalize.rs), so one handler serves them all.
 
 import { Bridge, onEvent } from "../core/bridge";
-import { buildFileDiff, fileName, makeDiffStep, toOneLine } from "../core/diff";
+import { fileName, makeDiffStep, parseDiffStep, toOneLine } from "../core/diff";
+import { activityPhase, fileDiffs, fileInput, filePath, isFileEdit, pendingPreview, toolName } from "../core/file-activity";
 import { Sound } from "../core/sound";
-import { State, type AskedQuestion } from "../core/state";
+import { State, type AgentTask, type AskedQuestion, type FilePreview } from "../core/state";
 import { pillDefinition } from "../core/pills";
 import { APPROVAL_AGENTS, agentColor, agentName, validateAgent } from "./agents";
 import type { Island } from "./island";
@@ -58,7 +59,11 @@ interface HookPayload {
   /** Stop: the turn's final answer (Markdown) — Claude Code's, Hermes's, Codex's. */
   last_assistant_message?: string;
   tool_name?: string;
-  tool_input?: Record<string, unknown>;
+  tool_input?: Record<string, unknown> | string;
+  tool_use_id?: string;
+  tool_call_id?: string;
+  call_id?: string;
+  coucou_activity?: { files?: FilePreview[]; terminal?: { command?: string; output?: string; failed?: boolean } };
   /** Set by the relay when an edit was too big to forward whole (> 256 KB). */
   coucou_diff_truncated?: boolean;
   /** Optional agent tag: lowercase, digits and hyphens, ≤ 24 chars. */
@@ -118,9 +123,12 @@ const TOOL_LABELS: Record<string, string> = {
 
 function stepLabel(tool: string, input: Record<string, unknown>): string {
   const labelTool = tool === "ask_question" || tool.endsWith(":ask_question") ? "ask_question" : tool;
-  const label = TOOL_LABELS[labelTool] ? t(TOOL_LABELS[labelTool]) : tool;
+  const base = toolName(tool);
+  const label = TOOL_LABELS[labelTool] ? t(TOOL_LABELS[labelTool]) : isFileEdit(tool, input) ? t("Edits")
+    : ["read", "read_file", "view_file"].includes(base) ? t("Reads")
+    : ["exec_command", "terminal", "shell", "bash", "run_command"].includes(base) ? t("Runs") : tool;
   const str = (k: string) => (typeof input[k] === "string" ? (input[k] as string) : null);
-  const cmd = str("command");
+  const cmd = str("command") ?? str("cmd");
   if (cmd) return `${label} · ${cmd.slice(0, 40)}`;
   const path = str("path");
   if (path) return `${label} · ${lastPathComponent(path)}`;
@@ -128,6 +136,13 @@ function stepLabel(tool: string, input: Record<string, unknown>): string {
   if (file) return `${label} · ${lastPathComponent(file)}`;
   const query = str("query");
   if (query) return `${label} · ${query.slice(0, 40)}`;
+  const target = filePath(input);
+  if (target) return `${label} · ${lastPathComponent(target)}`;
+  const patch = input.patch ?? input.input;
+  if (typeof patch === "string") {
+    const path = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/m.exec(patch)?.[1];
+    if (path) return `${label} · ${lastPathComponent(path)}`;
+  }
   if (
     (tool === "ask_question" || tool.endsWith(":ask_question")) &&
     Array.isArray(input.questions) &&
@@ -223,18 +238,48 @@ function clearFinalLine(id: string) {
 }
 
 /**
- * PostToolUse of Edit / MultiEdit / Write → a diff stored for the pill and a
+ * Completed file-tool events → diffs stored for the pill and
  * ticker step with its +N −M counts. Nothing is kept for a pill that does not
  * exist, so a stray event cannot grow memory. An edit the relay had to cut
  * would give wrong counts: the PreToolUse step ("Edits · file") stands alone.
  */
-function recordDiff(agentId: string, payload: HookPayload) {
-  if (payload.coucou_diff_truncated) return;
-  if (!State.tasks.some((t) => t.id === agentId)) return;
-  const diff = buildFileDiff(payload.tool_name ?? "", payload.tool_input ?? {});
-  if (!diff) return;
-  const id = State.appendSessionDiff(agentId, diff);
-  State.appendStep(agentId, makeDiffStep(fileName(diff.path), diff.added, diff.removed, id));
+function recordDiff(agentId: string, payload: HookPayload): number | null {
+  if (payload.coucou_diff_truncated) return null;
+  if (!State.tasks.some((t) => t.id === agentId)) return null;
+  let latest: number | null = null;
+  for (const diff of fileDiffs(payload.tool_name ?? "", fileInput(payload.tool_input))) {
+    if (payload.cwd && !/^(?:[\\/]|[A-Za-z]:[\\/])/.test(diff.path)) {
+      diff.path = `${payload.cwd.replace(/[\\/]+$/, "")}/${diff.path}`;
+    }
+    latest = State.appendSessionDiff(agentId, diff);
+    State.appendStep(agentId, makeDiffStep(fileName(diff.path), diff.added, diff.removed, latest));
+  }
+  return latest;
+}
+
+// Some observers omit arguments after a tool finishes. Reuse its own pre-event,
+// never another session's or an ambiguous concurrent call's input.
+const editingCalls: { agent: string; session: string; tool: string; id?: string; payload: HookPayload; at: number; owner?: AgentTask }[] = [];
+function trackFileCall(agent: string, session: string, event: string, payload: HookPayload): HookPayload {
+  const now = Date.now();
+  for (let i = editingCalls.length - 1; i >= 0; i--) {
+    const call = editingCalls[i];
+    if (call.owner !== State.tasks.find((task) => task.id === call.agent) || now - call.at > 300_000 || (TURN_OVER.has(event) && call.agent === agent && call.session === session)) editingCalls.splice(i, 1);
+  }
+  const tool = toolName(payload.tool_name ?? "");
+  const id = payload.tool_use_id ?? payload.tool_call_id ?? payload.call_id;
+  if (event === "PreToolUse" && activityPhase(tool, fileInput(payload.tool_input)) !== "other") {
+    if (editingCalls.length >= 64) editingCalls.shift();
+    editingCalls.push({ agent, session, tool, id, payload, at: now, owner: State.tasks.find((task) => task.id === agent) });
+  }
+  if (event !== "PostToolUse" && event !== "PostToolUseFailure") return payload;
+  const matches = editingCalls.filter((call) => call.agent === agent && call.session === session && call.tool === tool && (id == null || call.id === id));
+  if (matches.length !== 1) return payload;
+  const call = matches[0];
+  editingCalls.splice(editingCalls.indexOf(call), 1);
+  return Object.keys(fileInput(payload.tool_input)).length ? payload : {
+    ...payload, tool_input: call.payload.tool_input, coucou_diff_truncated: payload.coucou_diff_truncated || call.payload.coucou_diff_truncated,
+  };
 }
 
 export function registerHookHandlers(island: Island) {
@@ -273,6 +318,15 @@ function handleHook(island: Island, payload: HookPayload) {
   const agentId = validAgent ? `agent_${validAgent}` : workspaceId;
   const isExternalAgent = validAgent !== null;
   const sessionId = payload.session_id ?? "";
+  if (name !== "PreToolUse") payload = trackFileCall(agentId, sessionId, name, payload);
+
+  const followEditing = (diffId: number | null) => {
+    if (State.pendingApproval) return;
+    if (State.mode !== "expanded") State.setFocus(agentId);
+    // Queue the preview; only the pointer opens the panel. Work continues while
+    // the island is compact or hidden, just as for any other activity event.
+    if (State.focusId === agentId) island.showFileDiff?.(diffId);
+  };
 
   /** Alerts force the island open; work events only reveal the compact island. */
   const surface = (view: Parameters<Island["alert"]>[0], isAlert: boolean) => {
@@ -295,6 +349,8 @@ function handleHook(island: Island, payload: HookPayload) {
     } else {
       upsert(agentId, projectName, cwd, sessionId);
     }
+    const task = State.tasks.find((t) => t.id === agentId);
+    if (task) task.sessionEnded = false;
   };
 
   /**
@@ -324,8 +380,6 @@ function handleHook(island: Island, payload: HookPayload) {
 
   // Read after the card above is dropped: its pill may have handed the front
   // back to the pill you were on.
-  const focused = State.focusId === agentId;
-
   switch (name) {
     case "SessionStart":
       ensurePill();
@@ -352,20 +406,28 @@ function handleHook(island: Island, payload: HookPayload) {
 
     case "PreToolUse": {
       ensurePill();
+      trackFileCall(agentId, sessionId, name, payload);
       supersedeStop();
       clearFinalLine(agentId);
       const tool = payload.tool_name ?? "Tool";
       const isQuestion = tool === "ask_question" || tool.endsWith(":ask_question");
       if (isQuestion) {
         State.updateTask(agentId, "question");
-        State.appendStep(agentId, stepLabel(tool, payload.tool_input ?? {}));
+        State.appendStep(agentId, stepLabel(tool, fileInput(payload.tool_input)));
         Sound.play("question");
         surface("overview", true);
       } else {
         State.updateTask(agentId, "working");
-        State.appendStep(agentId, stepLabel(tool, payload.tool_input ?? {}));
+        State.appendStep(agentId, stepLabel(tool, fileInput(payload.tool_input)));
+        if (isFileEdit(tool, fileInput(payload.tool_input))) {
+          followEditing(null);
+        }
         surface("overview", false);
       }
+      const input = fileInput(payload.tool_input);
+      State.setActivityDetail(agentId, { tool, phase: activityPhase(tool, input), completed: false,
+        file: pendingPreview(tool, input),
+        command: typeof (input.command ?? input.cmd) === "string" ? String(input.command ?? input.cmd) : undefined });
       break;
     }
 
@@ -382,13 +444,51 @@ function handleHook(island: Island, payload: HookPayload) {
         dropPendingCard(island);
       }
       State.updateTask(agentId, "working");
-      recordDiff(agentId, payload);
+      {
+        const task = State.tasks.find((t) => t.id === agentId);
+        const first = task?.history?.length ?? 0;
+        const diffId = recordDiff(agentId, payload);
+        const tool = payload.tool_name ?? "";
+        const input = fileInput(payload.tool_input);
+        const phase = activityPhase(tool, input);
+        const files = (Array.isArray(payload.coucou_activity?.files) ? payload.coucou_activity.files : [])
+          .filter((file) => typeof file?.path === "string" && typeof file?.content === "string" && file.content.length <= 128 * 1024);
+        const assigned = new Set<FilePreview>();
+        for (let index = first; index < (task?.history?.length ?? 0); index++) {
+          const entry = parseDiffStep(task!.history![index]);
+          const diff = entry ? State.findDiff(agentId, entry.diffId) : null;
+          const file = files.find((file) => file.path === diff?.path) ?? (files.length === 1 ? files[0] : undefined);
+          if (file) assigned.add(file);
+          State.setActivityDetail(agentId, { tool, phase, completed: true, file }, index);
+        }
+        for (const file of files.filter((file) => !assigned.has(file))) {
+          State.appendStep(agentId, stepLabel(tool, { file_path: file.path }));
+          State.setActivityDetail(agentId, { tool, phase, completed: true, file });
+        }
+        const terminal = payload.coucou_activity?.terminal;
+        if (phase === "bash") {
+          const command = terminal?.command || String(input.command ?? input.cmd ?? "");
+          let index = (task?.history?.length ?? 0) - 1;
+          while (index >= 0 && !(task?.historyDetails?.[index]?.phase === "bash" && task.historyDetails[index].command === command)) index--;
+          if (index < 0 && (command || terminal?.output)) {
+            State.appendStep(agentId, stepLabel(tool, { command }));
+            index = (task?.history?.length ?? 0) - 1;
+          }
+          if (index >= 0) State.setActivityDetail(agentId, { tool, phase, completed: true, command,
+            output: typeof terminal?.output === "string" ? terminal.output.slice(0, 4000) : undefined, failed: terminal?.failed === true }, index);
+        }
+        if (diffId != null) followEditing(diffId);
+        else if (files.length || phase === "bash") followEditing(null);
+      }
       break;
 
     case "PostToolUseFailure":
       supersedeStop();
       State.updateTask(agentId, "working");
       State.appendStep(agentId, t("⚠ failed"));
+      State.setActivityDetail(agentId, { tool: payload.tool_name ?? "", phase: activityPhase(payload.tool_name ?? "", fileInput(payload.tool_input)),
+        completed: true, failed: true, command: payload.coucou_activity?.terminal?.command,
+        output: payload.coucou_activity?.terminal?.output?.slice(0, 4000) });
       break;
 
     case "Notification": {
@@ -420,14 +520,13 @@ function handleHook(island: Island, payload: HookPayload) {
       }
       Sound.play("finish");
       // A card waiting for an answer is never covered by another alert.
-      if (focused && !State.pendingApproval) surface("finished", true);
-      else State.setPillBadge(agentId, "finished");
+      State.setPillBadge(agentId, "finished");
       cancelStopTimer(agentId);
       stopTimers.set(
         agentId,
         window.setTimeout(() => {
           stopTimers.delete(agentId);
-          if (isExternalAgent) {
+          if (isExternalAgent && !State.tasks.find((t) => t.id === agentId)?.history?.length) {
             State.removeTask(agentId);
           } else {
             State.updateTask(agentId, "idle");
@@ -449,14 +548,21 @@ function handleHook(island: Island, payload: HookPayload) {
       supersedeStop();
       State.updateTask(agentId, "error");
       Sound.play("error");
-      if (focused && !State.pendingApproval) surface("error", true);
-      else State.setPillBadge(agentId, "error");
+      State.setPillBadge(agentId, "error");
       break;
 
     case "SessionEnd":
       // Nothing left for the timer to do, and it must not outlive the session: a
       // pill recreated within 5.2 s would be removed by it.
       cancelStopTimer(agentId);
+      {
+        const task = State.tasks.find((t) => t.id === agentId);
+        if (task?.history?.length) {
+          task.sessionEnded = true;
+          State.updateTask(agentId, "idle");
+          break;
+        }
+      }
       State.clearSessionDiffs(agentId);
       if (isExternalAgent) {
         State.removeTask(agentId);
@@ -494,7 +600,7 @@ function handleHook(island: Island, payload: HookPayload) {
       supersedeStop();
       if (pendingTimeout != null) window.clearTimeout(pendingTimeout);
       const tool = payload.tool_name ?? "Tool";
-      const input = payload.tool_input ?? {};
+      const input = fileInput(payload.tool_input);
       // Claude Code asking a question is not a permission to grant: the island
       // shows the options and sends back the one that was picked. Only Claude
       // Code asks questions this way.

@@ -5,9 +5,11 @@ import { Tracked, Spring, clamp } from "../core/anim";
 import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
 import {
   EXPANDED_CORNER, EXPANDED_W, NOTCH_W, PANEL_H, PANEL_W,
-  ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
+  ROUNDED_CORNER, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
   islandSize,
   QUESTION_PICKER_H,
+  TRACKING_H,
+  ACTIVITY_PEEK_H,
   type BotEmoteName, type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
@@ -20,7 +22,7 @@ import { SeasonCache, parseOutfit } from "../mochi/wardrobe";
 import { UploadCanvas } from "../upload/canvas";
 import { USC, UploadSeq } from "../upload/sequence";
 import { closePlanCard, openPlanColor, planCardOpen } from "../views/usage";
-import { buildHeader, buildViews, type ViewActions, type ViewHost } from "../views/views";
+import { buildHeader, buildViews, hasSessionTicker, type ViewActions, type ViewHost } from "../views/views";
 import { h } from "../views/dom";
 import { IslandStateMachine } from "./fsm";
 import { refreshHookPills } from "./integrations";
@@ -121,6 +123,7 @@ export class Island {
   /** Drop sequence bookkeeping: last tick played, and whether the ✓ has fired. */
   private uploadTens = 0;
   private uploadDone = false;
+  private trackingGeometry = 0;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -139,6 +142,11 @@ export class Island {
     };
     State.subscribe(() => {
       this.dirty = true;
+      const tracking = State.focusTask?.history?.length ? State.activityExpanded ? TRACKING_H : ACTIVITY_PEEK_H : 0;
+      if (tracking !== this.trackingGeometry) {
+        this.trackingGeometry = tracking;
+        if (State.mode === "expanded" && State.view === "overview") this.animateGeometry(false);
+      }
       this.ensureRunning();
     });
   }
@@ -146,8 +154,9 @@ export class Island {
   /** The request has its answer: the card goes and the session carries on. */
   private closeApproval() {
     State.endApproval();
-    this.fsm.pinned = false;
     this.setView(State.defaultView());
+    // Answering is an explicit close, independent of hover and auto-close delay.
+    this.collapse();
   }
 
   /**
@@ -170,6 +179,7 @@ export class Island {
       cancelDrop: () => this.discardDrop(),
       collapse: () => this.collapse(),
       foldApproval: () => this.foldApproval(),
+      expandActivity: () => this.expandActivity(),
       setFocus: (id) => {
         State.setFocus(id);
         Sound.play("blip");
@@ -339,7 +349,7 @@ export class Island {
 
   private wireFsm() {
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
-    this.fsm.openOnHover = State.settings.openOnHover;
+    this.fsm.openOnHover = this.hoverEnabled();
     this.fsm.onTransition = (from, to) => {
       // The greeting is over, however it ended: back to his desktop spot.
       if (from === "coucou" && to !== "coucou") this.desktop.launch();
@@ -422,6 +432,11 @@ export class Island {
   }
 
   setView(view: IslandViewName) {
+    const previousHeight = this.targetSize().h;
+    if (view === "overview") State.activityExpanded = false;
+    // Choosing another tab is an explicit interaction, even when activity was
+    // first opened by hover. Keep the tab usable while the agent continues.
+    if (view !== State.view && view !== "overview") this.fsm.userInteracted();
     this.stopSequenceIfLeaving(view);
     if (view !== "overview") closePlanCard();
     if (State.mode !== "expanded") {
@@ -431,8 +446,8 @@ export class Island {
       State.notify();
       return;
     }
-    const grew = VIEW_LAYOUTS[view].height >= VIEW_LAYOUTS[State.view].height;
     State.view = view;
+    const grew = this.targetSize().h >= previousHeight;
     State.lastActivity = performance.now();
     this.animateGeometry(!grew);
     State.notify();
@@ -470,7 +485,15 @@ export class Island {
    * permission or question always comes first.
    */
   private openingView(): IslandViewName {
+    if (!State.pendingApproval) State.activityExpanded = false;
+    if (!State.pendingApproval && State.focusTask?.history?.length) return "overview";
     return this.updateHintOn() ? "update" : State.defaultView();
+  }
+
+  /** Agent activity is inspected by hovering, even with general hover off. */
+  private hoverEnabled(): boolean {
+    return State.settings.openOnHover || State.tasks.some((task) =>
+      hasSessionTicker(task) && (task.steps.length > 0 || task.state !== "idle"));
   }
 
   reveal() {
@@ -568,6 +591,18 @@ export class Island {
   /** Ctrl+O / Ctrl+E go to the view on screen. */
   viewCommand(command: ViewCommand) {
     this.views.get(State.view)?.command?.(command);
+  }
+
+  /** Queue a file preview without changing the tab the user selected. */
+  showFileDiff(id: number | null) {
+    this.views.get("overview")?.showDiff?.(id);
+  }
+
+  /** The small preview expands only when the user asks to inspect it. */
+  expandActivity() {
+    if (State.pendingApproval) return;
+    State.activityExpanded = true;
+    this.expand("overview");
   }
 
   // ── File drop ───────────────────────────────────────────────────────────────
@@ -692,6 +727,7 @@ export class Island {
 
   private targetSize(): { w: number; h: number; r: number } {
     let { w, h } = islandSize(State.mode, State.view, State.chatHistory.length);
+    if (State.mode === "expanded" && State.view === "overview" && State.focusTask?.history?.length) h = State.activityExpanded ? TRACKING_H : ACTIVITY_PEEK_H;
     if (State.mode === "expanded" && State.view === "question" && State.pendingApproval?.questions) {
       h = QUESTION_PICKER_H;
     }
@@ -782,7 +818,8 @@ export class Island {
       Sound.resume();
       State.lastActivity = performance.now();
       // A click makes a hover-opened island an ordinary open one.
-      this.fsm.userInteracted();
+      // Inspecting an activity preview must still close it when the mouse leaves.
+      if (!this.fsm.openedByHover || !State.tasks.some(hasSessionTicker)) this.fsm.userInteracted();
       // A press on Mochi may become a drag out to the desktop.
       if (e.button === 0 && this.isBotHit(e.clientX, e.clientY)) {
         this.botPress = { x: e.clientX, y: e.clientY };
@@ -902,6 +939,7 @@ export class Island {
     this.wasInIsland = inIsland;
     if (inIsland && !wasIn) {
       if (this.fsm.state === "coucou") this.greeting.hover();
+      this.fsm.openOnHover = this.hoverEnabled();
       this.fsm.mouseEntered();
     }
     if (!inIsland && wasIn) {
@@ -1067,7 +1105,8 @@ export class Island {
   };
 
   private updateBotTargets() {
-    const p = botPosition(State.mode, State.view, this.height.value, State.uploadProgress);
+    const tracking = State.focusTask?.history?.length ? State.activityExpanded ? true : "peek" : false;
+    const p = botPosition(State.mode, State.view, this.height.value, State.uploadProgress, tracking);
     this.botCx.target = p.cx;
     this.botCy.target = p.cy;
     this.botSize.target = p.diameter / 0.6;
@@ -1079,7 +1118,7 @@ export class Island {
     const visible = p.opacity > 0 && !greetingActive && !this.uploadActive && !away;
     this.botCanvas.style.opacity = visible ? "1" : "0";
 
-    if (State.mode === "expanded" && State.view !== "uploading" && !greetingActive && !this.uploadActive && !away) {
+    if (State.mode === "expanded" && State.view !== "uploading" && !(State.view === "overview" && State.focusTask?.history?.length) && !greetingActive && !this.uploadActive && !away) {
       const d = p.diameter;
       const color = botGlowColor(State.effectiveState);
       this.botGlow.style.display = "block";
@@ -1273,7 +1312,7 @@ export class Island {
     Sound.setEnabled(State.settings.soundEnabled);
     Sound.setVolume(State.settings.soundVolume);
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
-    this.fsm.openOnHover = State.settings.openOnHover;
+    this.fsm.openOnHover = this.hoverEnabled();
     State.notify();
     // ponytail: one timer for the life of the window; a minute is the clock's finest tick.
     this.clockTimer ??= window.setInterval(() => this.updateClock(), 10_000);

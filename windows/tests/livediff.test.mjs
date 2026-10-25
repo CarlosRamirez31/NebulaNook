@@ -6,12 +6,22 @@ import { afterEach, beforeEach, mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { emit } from "./tauri.mjs";
 import { registerHookHandlers } from "../src/island/hooks.ts";
-import { DEFAULT_SETTINGS, DIFF_TTL_MS, MAX_DIFFS_PER_PILL, State } from "../src/core/state.ts";
+import { DEFAULT_SETTINGS, State } from "../src/core/state.ts";
 import { parseDiffStep } from "../src/core/diff.ts";
+import { KNOWN_AGENTS } from "../src/island/agents.ts";
+import { buildActivityPeek } from "../src/views/activity-peek.ts";
+import { ActivityCard } from "../src/views/activity.ts";
+import { installFakeDom } from "./fakedom.mjs";
 
 const CLAUDE = "integration_claude";
 
-const island = { alert() {}, setView() {}, reveal() {}, dropPin() {} };
+let shown = [];
+const island = {
+  alert(view) { shown.push(["alert", view]); },
+  setView(view) { shown.push(["view", view]); },
+  showFileDiff(id) { shown.push(["diff", id]); },
+  reveal() {}, dropPin() {},
+};
 registerHookHandlers(island);
 
 const hook = (payload) => emit("hook", payload);
@@ -28,6 +38,7 @@ const edit = (extra = {}) =>
   });
 
 beforeEach(() => {
+  shown = [];
   mock.timers.enable({ apis: ["setTimeout"] });
   for (const id of [...State.sessionDiffs.keys()]) State.clearSessionDiffs(id);
   State.tasks = [];
@@ -39,6 +50,101 @@ beforeEach(() => {
   State.pendingApproval = null;
   State.settings = { ...DEFAULT_SETTINGS };
   State.loadIntegrationTasks();
+});
+
+test("every integrated agent records ordinary file edits without opening the panel", () => {
+  for (const agent of [undefined, ...Object.keys(KNOWN_AGENTS)]) {
+    const pill = agent ? `agent_${agent}` : CLAUDE;
+    const session = `files-${agent ?? "claude"}`;
+    const payload = { coucou_agent: agent, session_id: session, tool_name: "edit_file", tool_use_id: "edit-1" };
+    shown = [];
+    hook({ ...payload, hook_event_name: "PreToolUse", tool_input: { path: "README.md", old_str: "old", new_str: "new" } });
+    assert.equal(State.focusId, pill);
+    assert.deepEqual(shown, [["diff", null]], "edits must not open a window");
+    assert.equal(diffs(pill).length, 0, "an intended edit is not an applied diff");
+    hook({ ...payload, hook_event_name: "PostToolUse" });
+    const [diff] = diffs(pill);
+    assert.equal(diff.path, "README.md");
+    assert.deepEqual(shown.at(-1), ["diff", diff.id]);
+    assert.equal(State.mode, "hidden", "recording a diff must not expand the island");
+    assert.ok(shown.every(([kind]) => kind === "diff"));
+  }
+});
+
+for (const agentId of [undefined, ...Object.keys(KNOWN_AGENTS)]) {
+test(`${agentId ?? "claude"}: Read, Edit, Bash and Done reach both tracking views`, () => {
+  const dom = installFakeDom();
+  document.createDocumentFragment = dom.root;
+  const peek = buildActivityPeek(() => {});
+  const card = new ActivityCard({ dismiss() {}, open() {} });
+  const base = { session_id: `tracking-${agentId ?? "claude"}`, coucou_agent: agentId };
+  const pill = agentId ? `agent_${agentId}` : CLAUDE;
+  const file = { path: "/p/notes.md", content: "# Before\n" };
+  hook({ ...base, hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: file.path } });
+  const agent = task(pill);
+  assert.equal(Object.values(agent.historyDetails).at(-1).completed, false);
+  peek.sync(agent);
+  card.sync(agent);
+  assert.equal(peek.el.querySelector(".peek-action").textContent, "Read");
+  assert.ok(card.el.find(".tracking-stage")[0].classList.contains("active"));
+  hook({ ...base, hook_event_name: "PostToolUse", tool_name: "Read", coucou_activity: { files: [file] } });
+  assert.equal(Object.values(agent.historyDetails).at(-1).file.content, "# Before\n");
+  peek.sync(agent);
+  card.sync(agent);
+  assert.match(peek.el.textContent, /# Before/);
+  assert.match(card.el.textContent, /# Before/);
+  hook({ ...base, hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: file.path, old_string: "# Before", new_string: "# After" } });
+  peek.sync(agent);
+  card.sync(agent);
+  assert.equal(peek.el.querySelector(".peek-action").textContent, "Edit");
+  assert.ok(card.el.find(".tracking-stage")[1].classList.contains("active"));
+  hook({ ...base, hook_event_name: "PostToolUse", tool_name: "Edit", coucou_activity: { files: [{ ...file, content: "# After\n" }] } });
+  const edit = Object.values(agent.historyDetails).at(-1);
+  assert.equal(edit.phase, "edit");
+  assert.equal(edit.completed, true);
+  assert.equal(edit.file.content, "# After\n");
+  peek.sync(agent);
+  card.sync(agent);
+  assert.match(card.el.querySelector(".tracking-code").textContent, /# Before/);
+  assert.match(card.el.querySelector(".tracking-code").textContent, /# After/);
+  hook({ ...base, hook_event_name: "PreToolUse", tool_name: "functions.exec_command", tool_input: { cmd: "npm test" } });
+  hook({ ...base, hook_event_name: "PostToolUse", tool_name: "functions.exec_command", coucou_activity: { terminal: { command: "npm test", output: "PASS tests/notes.test.ts", failed: false } } });
+  const terminal = Object.values(agent.historyDetails).at(-1);
+  assert.equal(terminal.phase, "bash");
+  assert.equal(terminal.command, "npm test");
+  assert.equal(terminal.output, "PASS tests/notes.test.ts");
+  hook({ ...base, hook_event_name: "Stop", last_assistant_message: "Done." });
+  assert.equal(agent.turnFinished, true);
+  assert.ok(shown.every(([kind]) => kind === "diff"));
+});
+}
+
+test("concurrent edits are correlated by call and session; ambiguous results get no guessed diff", () => {
+  const pre = (session_id, tool_use_id, path) => hook({ hook_event_name: "PreToolUse", session_id, tool_use_id,
+    tool_name: "Edit", tool_input: { file_path: path, old_string: "a", new_string: "b" } });
+  const post = (session_id, tool_use_id, extra = {}) => hook({ hook_event_name: "PostToolUse", session_id, tool_use_id, tool_name: "Edit", ...extra });
+  pre("parallel", "one", "first.txt");
+  pre("parallel", "two", "second.json");
+  pre("other-session", "one", "other.md");
+  post("parallel");
+  assert.equal(diffs().length, 0);
+  post("parallel", "two");
+  post("other-session", "one");
+  post("parallel", "one", { hook_event_name: "PostToolUseFailure" });
+  assert.deepEqual(diffs().map((d) => d.path), ["second.json", "other.md"]);
+});
+
+test("editing never takes a pending approval's focus or opens a truncated diff", () => {
+  State.beginApproval({ pillId: CLAUDE, requestId: "approval", sessionId: "waiting", tool: "Bash", command: "ls" });
+  State.view = "approval";
+  hook({ hook_event_name: "PreToolUse", coucou_agent: "hermes", session_id: "busy", tool_name: "patch",
+    tool_input: { path: "notes.txt", old_string: "a", new_string: "b" }, coucou_diff_truncated: true });
+  hook({ hook_event_name: "PostToolUse", coucou_agent: "hermes", session_id: "busy", tool_name: "patch" });
+  assert.equal(State.focusId, CLAUDE);
+  assert.equal(State.pendingApproval.requestId, "approval");
+  assert.deepEqual(shown, []);
+  assert.deepEqual(diffs("agent_hermes"), []);
+  State.endApproval();
 });
 
 afterEach(() => {
@@ -71,7 +177,7 @@ test("Write and MultiEdit are diffed too; other tools and PreToolUse are not", (
   const before = task().steps.length;
   hook({ hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "ls" } });
   hook({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: "/p/a.ts", old_string: "a", new_string: "b" } });
-  assert.equal(task().steps.length, before + 1); // only the PreToolUse label
+  assert.equal(task().steps.length, before + 2); // command result and the PreToolUse label
   assert.equal(parseDiffStep(task().steps.at(-1)), null);
   assert.equal(diffs().length, 2);
 });
@@ -83,36 +189,42 @@ test("an edit with no change, or one the relay had to cut, adds no diff", () => 
   assert.equal(diffs().length, 0);
 });
 
-test("diffs are capped per pill, oldest first, and ids stay unique", () => {
-  for (let i = 0; i < MAX_DIFFS_PER_PILL + 5; i++) edit();
+test("all file edits stay reachable beyond the old ticker and diff limits", () => {
+  for (let i = 0; i < 60; i++) edit();
   const kept = diffs();
-  assert.equal(kept.length, MAX_DIFFS_PER_PILL);
-  assert.equal(new Set(kept.map((d) => d.id)).size, MAX_DIFFS_PER_PILL);
+  assert.equal(kept.length, 60);
+  assert.equal(task().history.length, 60);
+  assert.equal(new Set(kept.map((d) => d.id)).size, 60);
   // The ticker keeps fewer steps than diffs; every step still finds its diff.
   for (const s of task().steps) assert.ok(State.findDiff(CLAUDE, parseDiffStep(s).diffId));
   // The first ones are gone: tapping their step would be a no-op.
   assert.equal(State.findDiff(CLAUDE, kept[0].id - 1), null);
 });
 
-test("diffs are forgotten an hour after the last one, and at the end of the session", () => {
+test("history survives completion, session end and elapsed time until explicitly dismissed", () => {
   edit();
-  mock.timers.tick(DIFF_TTL_MS - 1000);
-  edit(); // re-arms the hour
+  mock.timers.tick(3_600_000);
+  edit();
   mock.timers.tick(2000);
   assert.equal(diffs().length, 2);
-  mock.timers.tick(DIFF_TTL_MS);
-  assert.equal(diffs().length, 0);
-
-  edit();
+  hook({ hook_event_name: "Stop" });
   hook({ hook_event_name: "SessionEnd", cwd: "/p/proj" });
+  mock.timers.tick(3_600_000);
+  assert.equal(diffs().length, 2);
+  assert.equal(task().history.length, 2);
+  State.dismissHistory(CLAUDE);
   assert.equal(diffs().length, 0);
+  assert.deepEqual(task().history, []);
 });
 
-test("an agent pill's diffs go with the pill", () => {
+test("an ended agent's history stays until X dismisses its pill", () => {
   hook({ hook_event_name: "PreToolUse", coucou_agent: "gemini", tool_name: "Edit", tool_input: { file_path: "/p/a.ts" } });
   edit({ coucou_agent: "gemini" });
   assert.equal(diffs("agent_gemini").length, 1);
   hook({ hook_event_name: "SessionEnd", coucou_agent: "gemini" });
+  assert.equal(task("agent_gemini").sessionEnded, true);
+  assert.equal(State.sessionDiffs.has("agent_gemini"), true);
+  State.dismissHistory("agent_gemini");
   assert.equal(task("agent_gemini"), undefined);
   assert.equal(State.sessionDiffs.has("agent_gemini"), false);
   // An event for a pill that does not exist stores nothing.
@@ -150,7 +262,6 @@ for (const [what, event] of [
   ["a new prompt", { hook_event_name: "UserPromptSubmit", prompt: "next" }],
   ["a tool starting", { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } }],
   ["a new session", { hook_event_name: "SessionStart" }],
-  ["the end of the session", { hook_event_name: "SessionEnd" }],
 ]) {
   test(`the final message stays until ${what}`, () => {
     hook({ hook_event_name: "Stop", last_assistant_message: "Done." });

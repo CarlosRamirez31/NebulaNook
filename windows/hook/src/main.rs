@@ -30,6 +30,7 @@ use std::time::Duration;
 use serde_json::{Map, Value};
 
 mod normalize;
+mod activity;
 mod reply;
 
 /// Budget for getting a pipe connection. Beyond this the agent wins, always.
@@ -48,11 +49,19 @@ const MAX_FIELD_LEN: usize = 2_000;
 
 mod statusline;
 
-/// The live diff needs the whole text of a file edit, once it has happened:
-/// PostToolUse of these tools keeps its edit strings far longer than the rest.
-const DIFF_TOOLS: &[&str] = &["Edit", "MultiEdit", "Write"];
+/// File tools keep bounded edit text before/after execution. Some observers
+/// omit input after completion, so the island correlates the two events.
+const DIFF_TOOLS: &[&str] = &[
+    "edit", "multiedit", "write", "write_file", "write_to_file", "create_file",
+    "file_write", "file_edit", "edit_file", "replace", "replace_file_content",
+    "multi_replace_file_content", "str_replace", "strreplace", "search_replace", "str_replace_editor", "apply_patch", "patch",
+];
 /// The `tool_input` keys holding the text being replaced or written.
-const DIFF_FIELDS: &[&str] = &["old_string", "new_string", "content"];
+const DIFF_FIELDS: &[&str] = &[
+    "old_string", "new_string", "content", "contents", "file_text", "FileContent", "CodeContent",
+    "old_str", "new_str", "oldText", "newText", "TargetContent", "ReplacementContent",
+    "old", "new", "patch", "input", "patchText",
+];
 /// Per edit string. The island stops diffing at 200 KB anyway (DiffEngine).
 const MAX_DIFF_FIELD_LEN: usize = 256 * 1024;
 /// For all edit strings of one event together, so the line stays well under the
@@ -181,6 +190,7 @@ fn prepare(raw: &[u8], args: &Args, env: &dyn Fn(&str) -> Option<String>, cwd: &
         canonical
     };
     map.insert("hook_event_name".into(), Value::String(name.clone()));
+    let activity = activity::capture(map, &name, cwd);
 
     for field in DROPPED_FIELDS {
         map.remove(*field);
@@ -201,6 +211,12 @@ fn prepare(raw: &[u8], args: &Args, env: &dyn Fn(&str) -> Option<String>, cwd: &
     // Every string is capped, except the edit text of a finished Edit /
     // MultiEdit / Write, which the live diff needs whole (within its own limits).
     truncate_payload(&mut payload, &name);
+    if let Some(activity) = activity {
+        payload["coucou_activity"] = activity;
+        if payload.to_string().len() > 900_000 {
+            payload.as_object_mut()?.remove("coucou_activity");
+        }
+    }
 
     let mut line = payload.to_string();
     line.push('\n');
@@ -271,15 +287,15 @@ fn term_editor(env: &dyn Fn(&str) -> Option<String>) -> Option<&'static str> {
 }
 
 /// Caps the strings of a payload: every field to MAX_FIELD_LEN, except the edit
-/// strings of a finished Edit / MultiEdit / Write, which the live diff needs
-/// whole. If even those had to be cut, `coucou_diff_truncated` tells the island
+/// strings of file tools, which the live diff needs whole. If even those
+/// had to be cut, `coucou_diff_truncated` tells the island
 /// not to show counts it cannot trust.
 fn truncate_payload(payload: &mut serde_json::Value, event: &str) {
-    let keeps_diff = event == "PostToolUse"
+    let keeps_diff = matches!(event, "PreToolUse" | "PostToolUse")
         && payload
             .get("tool_name")
             .and_then(|v| v.as_str())
-            .is_some_and(|tool| DIFF_TOOLS.contains(&tool));
+            .is_some_and(|tool| DIFF_TOOLS.contains(&tool.rsplit(['.', ':', '/']).next().unwrap_or(tool).to_lowercase().as_str()));
     let input = if keeps_diff {
         payload.as_object_mut().and_then(|map| map.remove("tool_input"))
     } else {
@@ -502,11 +518,11 @@ mod tests {
         let raw = format!(r#"{{"hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{{"old_string":"{big}","new_string":"a"}}}}"#);
         let (v, _) = run(&raw, "", "");
         assert_eq!(v["tool_input"]["old_string"].as_str().unwrap().len(), big.len());
-        // The same edit before it happens, or an agent's event renamed onto
-        // PreToolUse: the ordinary cap.
+        // The before-event also carries bounded edit text for observers that
+        // omit it after completion.
         let raw = format!(r#"{{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{{"old_string":"{big}"}}}}"#);
         let (v, _) = run(&raw, "", "");
-        assert!(v["tool_input"]["old_string"].as_str().unwrap().len() <= MAX_FIELD_LEN + 4);
+        assert_eq!(v["tool_input"]["old_string"].as_str().unwrap().len(), big.len());
         let raw = format!(r#"{{"hook_event_name":"BeforeTool","tool_name":"Edit","tool_input":{{"content":"{big}"}}}}"#);
         let (v, ev) = run(&raw, "gemini", "");
         assert_eq!(ev.name, "PermissionRequest");
@@ -537,13 +553,39 @@ mod tests {
     }
 
     #[test]
-    fn edits_are_still_capped_before_they_happen_and_for_other_tools() {
+    fn permissions_and_other_tools_keep_the_ordinary_cap() {
         let big = "é".repeat(4_000);
-        for (event, tool) in [("PreToolUse", "Edit"), ("PermissionRequest", "Write"), ("PostToolUse", "Bash")] {
+        for (event, tool) in [("PermissionRequest", "Write"), ("PostToolUse", "Bash")] {
             let mut v = serde_json::json!({ "tool_name": tool, "tool_input": { "content": big } });
             truncate_payload(&mut v, event);
             assert!(v["tool_input"]["content"].as_str().unwrap().len() <= MAX_FIELD_LEN + 4, "{event} {tool}");
         }
+    }
+
+    #[test]
+    fn freeform_and_agent_edit_inputs_survive_the_relay_without_losing_diff_text() {
+        let big = "x".repeat(10_000);
+        for tool in ["functions.apply_patch", "patch", "edit_file", "replace_file_content", "write_file"] {
+            let raw = serde_json::json!({
+                "hook_event_name": "PreToolUse", "tool_name": tool,
+                "tool_input": { "patch": big, "old_str": big, "TargetContent": big },
+            });
+            let (v, _) = run(&raw.to_string(), "", "");
+            for field in ["patch", "old_str", "TargetContent"] {
+                assert_eq!(v["tool_input"][field].as_str().unwrap().len(), big.len());
+            }
+        }
+        let raw = serde_json::json!({ "hook_event_name": "PostToolUse", "tool_name": "functions.apply_patch", "tool_input": big });
+        let (v, _) = run(&raw.to_string(), "codex", "");
+        assert_eq!(v["tool_input"]["patch"].as_str().unwrap().len(), big.len());
+    }
+
+    #[test]
+    fn an_explicit_failed_tool_result_cannot_become_an_applied_diff() {
+        let raw = r#"{"hook_event_name":"PostToolUse","tool_name":"Edit","tool_response":{"is_error":true}}"#;
+        let (v, ev) = run(raw, "", "");
+        assert_eq!(ev.name, "PostToolUseFailure");
+        assert!(v.get("tool_response").is_none());
     }
 
     #[test]

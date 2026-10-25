@@ -15,22 +15,29 @@ use tauri::{AppHandle, Emitter, Manager, Monitor, PhysicalPosition, PhysicalSize
 use crate::platform::{self, cursor_physical, left_button_down};
 
 /// Logical size of the full window — the largest island view, like the macOS panel.
-pub const PANEL_W: f64 = 720.0;
-pub const PANEL_H: f64 = 320.0;
+pub const UI_SCALE: f64 = 1.4;
+pub const PANEL_W: f64 = 720.0 * UI_SCALE;
+pub const PANEL_H: f64 = 320.0 * UI_SCALE;
 /// Logical size of the invisible strip that wakes the island when it is hidden.
-pub const STRIP_W: f64 = 240.0;
-pub const STRIP_H: f64 = 6.0;
+pub const STRIP_W: f64 = 240.0 * UI_SCALE;
+pub const STRIP_H: f64 = 6.0 * UI_SCALE;
 
 pub const WINDOW_LABEL: &str = "island";
 
 /// Margin around the island that still counts as "on the island", in logical px.
 /// Wider than the macOS 6 pt because a click must never be swallowed.
-const HIT_MARGIN: f64 = 14.0;
+const HIT_MARGIN: f64 = 14.0 * UI_SCALE;
 
 #[derive(Serialize, Clone)]
 pub struct CursorPayload {
     pub x: f64,
     pub y: f64,
+}
+
+impl CursorPayload {
+    fn from_logical(x: f64, y: f64) -> Self {
+        Self { x: x / UI_SCALE, y: y / UI_SCALE }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -51,6 +58,12 @@ pub struct IslandRect {
     pub y: f64,
     pub w: f64,
     pub h: f64,
+}
+
+impl IslandRect {
+    pub fn from_css(x: f64, y: f64, w: f64, h: f64) -> Self {
+        Self { x: x * UI_SCALE, y: y * UI_SCALE, w: w * UI_SCALE, h: h * UI_SCALE }
+    }
 }
 
 /// Wakes / parks the cursor poll thread so a hidden island costs literally nothing.
@@ -300,6 +313,26 @@ mod zoom_tests {
     use super::*;
 
     #[test]
+    fn enlarged_zoom_is_stable_across_display_scales() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let target = scale * UI_SCALE;
+            let zoom = calculate_zoom_correction(1.0, target, scale).unwrap();
+            assert!((zoom - UI_SCALE).abs() < 1e-9);
+            assert_eq!(calculate_zoom_correction(zoom, target, scale * zoom), None);
+        }
+    }
+
+    #[test]
+    fn enlarged_input_region_and_cursor_share_css_coordinates() {
+        let rect = IslandRect::from_css(40.0, 0.0, 640.0, 316.0);
+        let cursor = CursorPayload::from_logical(rect.x + rect.w, rect.y + rect.h);
+        assert!((cursor.x - 680.0).abs() < 1e-9);
+        assert!((cursor.y - 316.0).abs() < 1e-9);
+        assert!(rect.x + rect.w <= PANEL_W);
+        assert!(rect.y + rect.h <= PANEL_H);
+    }
+
+    #[test]
     fn zoom_correction_is_none_when_dpr_matches_window_scale() {
         assert_eq!(calculate_zoom_correction(1.0, 1.0, 1.0), None);
         assert_eq!(calculate_zoom_correction(1.0, 1.25, 1.25), None);
@@ -496,7 +529,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                     let _ = win.set_ignore_cursor_events(!accept);
                 }
 
-                let _ = win.emit("cursor", CursorPayload { x, y });
+                let _ = win.emit("cursor", CursorPayload::from_logical(x, y));
             }
         }
     });

@@ -109,6 +109,17 @@ pub fn fields(map: &mut Map<String, Value>, env: &dyn Fn(&str) -> Option<String>
         }
     }
 
+    // Freeform patch tools send a string; others may send JSON-encoded args.
+    // Preserve their bounded edit text using the same object contract as Edit.
+    if let Some(raw) = map.get("tool_input").and_then(Value::as_str) {
+        let parsed = serde_json::from_str::<Value>(raw).ok().filter(Value::is_object);
+        let patch_tool = map.get("tool_name").and_then(Value::as_str)
+            .is_some_and(|tool| matches!(tool.rsplit(['.', ':', '/']).next(), Some("apply_patch" | "patch")));
+        if let Some(input) = parsed.or_else(|| patch_tool.then(|| serde_json::json!({ "patch": raw }))) {
+            map.insert("tool_input".into(), input);
+        }
+    }
+
     if non_empty_str(map, "session_id").is_none() {
         let sid = ["conversationId", "conversation_id", "sessionId", "GEMINI_SESSION_ID"]
             .iter()
@@ -136,6 +147,10 @@ pub fn fields(map: &mut Map<String, Value>, env: &dyn Fn(&str) -> Option<String>
 /// The event once the payload is known: a stop that reports an error (Cursor's
 /// `status: "error"`) is a StopFailure.
 pub fn refine(event: &str, map: &Map<String, Value>) -> String {
+    if event == "PostToolUse" && (map.get("is_error").and_then(Value::as_bool) == Some(true)
+        || map.get("tool_response").and_then(|v| v.get("is_error")).and_then(Value::as_bool) == Some(true)) {
+        return "PostToolUseFailure".into();
+    }
     if event == "Stop" && map.get("status").and_then(Value::as_str) == Some("error") {
         return "StopFailure".into();
     }

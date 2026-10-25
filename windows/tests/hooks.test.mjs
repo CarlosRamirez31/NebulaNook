@@ -153,21 +153,21 @@ test("an unknown event changes nothing", () => {
 
 // ── Stop ──────────────────────────────────────────────────────────────────────
 
-test("a finished session opens the finished view, then goes idle after 5.2 s", () => {
+test("a finished session records completion without opening a panel, then goes idle", () => {
   hook({ hook_event_name: "Stop", message: "done" });
   assert.equal(task().state, "finished");
   assert.deepEqual(task().steps, ["done"]);
-  assert.deepEqual(asked, ["alert:finished"]);
+  assert.deepEqual(asked, []);
   seconds(5.1);
   assert.equal(task().state, "finished");
   seconds(0.1);
   assert.equal(task().state, "idle");
 });
 
-test("an alert on an island that is already open only switches its view", () => {
+test("completion leaves an already open activity panel in place", () => {
   State.mode = "expanded";
   hook({ hook_event_name: "Stop" });
-  assert.deepEqual(asked, ["setView:finished"]);
+  assert.deepEqual(asked, []);
 });
 
 test("a session finishing behind another pill only badges its own, for 5.2 s", () => {
@@ -179,21 +179,22 @@ test("a session finishing behind another pill only badges its own, for 5.2 s", (
   assert.equal(task().pillBadge, null);
 });
 
-test("a failed stop shows the error view, or the error badge behind another pill", () => {
+test("a failed stop records an error badge without opening the panel", () => {
   hook({ hook_event_name: "StopFailure" });
   assert.equal(task().state, "error");
-  assert.deepEqual(asked, ["alert:error"]);
+  assert.deepEqual(asked, []);
   State.setFocus("integration_n8n");
   hook({ hook_event_name: "StopFailure" });
   assert.equal(task().pillBadge, "error");
 });
 
-test("the end of a session puts the pill back as it was", () => {
+test("the end of a session preserves its project and steps for review", () => {
   hook({ hook_event_name: "PreToolUse", cwd: "/p/proj", tool_name: "Bash", tool_input: { command: "ls" } });
   hook({ hook_event_name: "SessionEnd", cwd: "/p/proj" });
   assert.equal(task().state, "idle");
-  assert.equal(task().name, "Claude Code");
-  assert.deepEqual(task().steps, []);
+  assert.equal(task().name, "proj");
+  assert.deepEqual(task().history, ["Runs · ls"]);
+  assert.equal(task().sessionEnded, true);
 });
 
 // Stop arms a 5.2 s timer that puts the pill back to idle. It used to be armed
@@ -383,7 +384,7 @@ test("Hermes says where a gateway session comes from", () => {
   assert.deepEqual(task("agent_hermes").steps, ["Telegram"]);
   hook({ hook_event_name: "SessionEnd", coucou_agent: "hermes" });
   hook({ hook_event_name: "SessionStart", coucou_agent: "hermes", platform: "cli" });
-  assert.deepEqual(task("agent_hermes").steps, []);
+  assert.deepEqual(task("agent_hermes").history, ["Telegram"]);
 });
 
 test("an agent's last words show when it stops", () => {
@@ -413,6 +414,8 @@ test("Claude Code in Cursor's terminal works on the Cursor pill, made for the se
   assert.equal(task("agent_cursor").sessionId, "s9");
   assert.equal(task().state, "idle");
   hook({ hook_event_name: "SessionEnd", term_editor: "cursor" });
+  assert.equal(task("agent_cursor").sessionEnded, true);
+  State.dismissHistory("agent_cursor");
   assert.equal(task("agent_cursor"), undefined);
 });
 

@@ -30,13 +30,12 @@ async function main() {
   void Sound.preload();
 
   // Before the island exists: its canvases size their bitmaps from the pixel
-  // ratio once, so the zoom correction has to land first. If zoom was adjusted,
-  // wait until the ratio updates (or up to 500ms) so nothing is sized against
-  // the stale value.
-  const dprBefore = window.devicePixelRatio || 1;
-  const zoomChanged = await Bridge.fitZoom(dprBefore);
+  // ratio once, so the zoom correction has to land first. Wait for its viewport
+  // resize (up to 500ms); WebKit can keep the same devicePixelRatio after zoom.
+  const widthBefore = window.innerWidth;
+  const zoomChanged = await Bridge.fitZoom(widthBefore);
   if (zoomChanged) {
-    for (let i = 0; i < 20 && window.devicePixelRatio === dprBefore; i++) {
+    for (let i = 0; i < 20 && window.innerWidth === widthBefore; i++) {
       await new Promise((r) => setTimeout(r, 25));
     }
   }
@@ -101,8 +100,7 @@ async function main() {
   });
 
   const checkZoom = async () => {
-    const dpr = window.devicePixelRatio || 1;
-    await Bridge.fitZoom(dpr);
+    await Bridge.fitZoom(window.innerWidth);
   };
 
   await onEvent<null>("screen-changed", async () => {

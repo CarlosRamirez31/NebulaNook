@@ -856,6 +856,7 @@ export const CoucouPlugin = async ({ directory } = {}) => ({
       session_id: input?.sessionID || '',
       cwd: directory || '',
       tool_name: typeof input?.tool === 'string' ? input.tool : '',
+      tool_use_id: input?.callID,
       tool_input: output?.args ?? null,
     });
   },
@@ -864,6 +865,8 @@ export const CoucouPlugin = async ({ directory } = {}) => ({
       session_id: input?.sessionID || '',
       cwd: directory || '',
       tool_name: typeof input?.tool === 'string' ? input.tool : '',
+      tool_use_id: input?.callID,
+      tool_input: input?.args ?? input?.input ?? null,
     });
   },
 });
@@ -884,6 +887,7 @@ export default {
             session_id: input?.sessionID || '',
             cwd: dir,
             tool_name: typeof input?.tool === 'string' ? input.tool : '',
+            tool_use_id: input?.callID,
             tool_input: output?.args ?? input?.input ?? null,
           });
         });
@@ -892,6 +896,8 @@ export default {
             session_id: input?.sessionID || '',
             cwd: dir,
             tool_name: typeof input?.tool === 'string' ? input.tool : '',
+            tool_use_id: input?.callID,
+            tool_input: input?.args ?? input?.input ?? null,
           });
         });
       } catch {}
@@ -957,6 +963,7 @@ export default function (amp: any): void {
   amp.on('session.start', (e: any) => forward('SessionStart', { session_id: e?.thread?.id ?? '' }));
   amp.on('agent.start', (e: any) => forward('UserPromptSubmit', { session_id: e?.thread?.id ?? '', prompt: typeof e?.message === 'string' ? e.message : '' }));
   amp.on('tool.call', async (e: any) => {
+    forward('PreToolUse', { session_id: e?.thread?.id ?? '', tool_name: typeof e?.tool === 'string' ? e.tool : '', tool_input: e?.input ?? null });
     if (!needsApproval(e)) return undefined;
     const choice = await askCoucou(e);
     return choice === 'allow' ? { action: 'allow' } : { action: 'reject-and-continue', message: 'Denied from Coucou.' };
@@ -1013,12 +1020,15 @@ def register(ctx):
         _fire({'hook_event_name': 'PreToolUse',
                'session_id': kwargs.get('session_id', '') or _current_session_id,
                'tool_name': kwargs.get('tool_name', ''),
+               'tool_use_id': kwargs.get('tool_call_id') or kwargs.get('task_id'),
                'tool_input': kwargs.get('args') or {}})
 
     def post_tool_call(**kwargs):
         _fire({'hook_event_name': 'PostToolUse',
                'session_id': kwargs.get('session_id', '') or _current_session_id,
-               'tool_name': kwargs.get('tool_name', '')})
+               'tool_name': kwargs.get('tool_name', ''),
+               'tool_use_id': kwargs.get('tool_call_id') or kwargs.get('task_id'),
+               'tool_input': kwargs.get('args')})
 
     def approval_transport(request):
         payload = {

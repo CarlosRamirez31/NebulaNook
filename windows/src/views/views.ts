@@ -17,6 +17,8 @@ import {
   PlanCard, buildPlanPill, claudePillVisible, codexPillVisible, planCardOpen, refreshCodexPlanUsage,
 } from "./usage";
 import { buildDiffCard } from "./diff";
+import { ActivityCard } from "./activity";
+import { buildActivityPeek } from "./activity-peek";
 import { lastTextStep } from "../core/diff";
 import { Bridge } from "../core/bridge";
 import { buildRecap } from "./recap";
@@ -38,6 +40,7 @@ export interface ViewActions {
   collapse(): void;
   /** Folds a waiting card to the compact island without answering it. */
   foldApproval(): void;
+  expandActivity(): void;
   setFocus(id: string): void;
   openTerminal(): void;
   /** The ↗ button: opens whatever the focused pill points at. */
@@ -66,6 +69,7 @@ export interface ViewActions {
 export interface ViewHost {
   el: HTMLElement;
   sync(): void;
+  showDiff?(id: number | null): void;
   /** Called when the view becomes active, for views with a text field. */
   focus?(): void;
   /** Called every frame while the view is on screen. True = needs another frame. */
@@ -144,6 +148,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
     el,
     sync() {
       const v = State.view;
+      el.classList.toggle("tracking-header", v === "overview" && !!State.focusTask?.history?.length && State.activityExpanded);
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
       tabChat.classList.toggle("on", v === "prompt");
       tabDrop.classList.toggle("on", v === "upload");
@@ -176,9 +181,16 @@ export function buildHeader(actions: ViewActions): ViewHost {
 
 // ── Overview ──────────────────────────────────────────────────────────────────
 
-function buildOverview(actions: ViewActions): ViewHost {
+export function buildOverview(actions: ViewActions): ViewHost {
   /** The diff open in the left card (a FileDiff id), as activeDiffId on macOS. */
   let activeDiffId: number | null = null;
+  let incomingDiffId: number | null | undefined;
+  const activity = new ActivityCard({
+    dismiss: (id) => { State.dismissHistory(id); actions.collapse(); },
+    open: (path) => void Bridge.openFileInVSCode(path),
+    fold: () => actions.setView("overview"),
+  });
+  const peek = buildActivityPeek(() => actions.expandActivity());
   const closeDiff = () => {
     if (activeDiffId == null) return;
     activeDiffId = null;
@@ -222,7 +234,7 @@ function buildOverview(actions: ViewActions): ViewHost {
   let pillIds = "";
   let detailOpen = false;
   let lastFocus: string | null = null;
-  let mode: "ticker" | "card" | "plan" | "diff" | "spotify" | "whatsapp" | null = null;
+  let mode: "ticker" | "peek" | "history" | "card" | "plan" | "diff" | "spotify" | "whatsapp" | null = null;
   let cardKey = "";
   /** The list row highlighted at the last sync, to scroll only when it moves. */
   let shownSelection: number | null = null;
@@ -283,6 +295,11 @@ function buildOverview(actions: ViewActions): ViewHost {
       return ticker.animating;
     },
     command(command) {
+      if (command === "toggleDiff" && State.focusTask?.history?.length) {
+        if (!State.activityExpanded) { actions.expandActivity(); return; }
+        activity.toggleDiff();
+        return;
+      }
       if (command === "openSelection") {
         // Ctrl+O: what a click on the highlighted row does.
         if (mode !== "card" || State.cardSelection == null) return;
@@ -302,14 +319,24 @@ function buildOverview(actions: ViewActions): ViewHost {
       activeDiffId = last.id;
       State.notify();
     },
+    showDiff(id) {
+      if (id == null) activeDiffId = null;
+      incomingDiffId = id;
+      State.notify();
+    },
     sync() {
       const task = State.focusTask;
+      el.classList.toggle("tracking", !!task?.history?.length && State.activityExpanded && !planCardOpen());
       if (task?.id !== lastFocus) {
         lastFocus = task?.id ?? null;
         detailOpen = false;
         activeDiffId = null;
         cardKey = "";
         mode = null;
+      }
+      if (incomingDiffId !== undefined && !task?.history?.length) {
+        activeDiffId = incomingDiffId;
+        incomingDiffId = undefined;
       }
 
       // A workspace or agent pill with a live session keeps the ticker; every
@@ -334,6 +361,24 @@ function buildOverview(actions: ViewActions): ViewHost {
           mode = "plan";
         }
         plan.sync();
+      } else if (task?.history?.length && !State.activityExpanded) {
+        if (mode !== "peek") {
+          clear(leftBody);
+          leftBody.append(peek.el);
+          mode = "peek";
+        }
+        peek.sync(task);
+      } else if (task?.history?.length) {
+        if (mode !== "history") {
+          clear(leftBody);
+          leftBody.append(activity.el);
+          mode = "history";
+        }
+        activity.sync(task);
+        if (incomingDiffId !== undefined) {
+          activity.showDiff(incomingDiffId);
+          incomingDiffId = undefined;
+        }
       } else if (task && diff) {
         const key = `diff~${task.id}~${diff.id}`;
         if (key !== cardKey) {
@@ -403,7 +448,7 @@ function buildOverview(actions: ViewActions): ViewHost {
         }
       }
 
-      jump.style.display = detailOpen || mode === "plan" || mode === "diff" ? "none" : "";
+      jump.style.display = detailOpen || mode === "plan" || mode === "diff" || mode === "history" || mode === "peek" ? "none" : "";
 
       // Ctrl+↓ Ctrl+↑ walk the open GitHub list (cardItemCount / cardSelection).
       const rows = mode === "card" ? listRows(leftBody) : [];

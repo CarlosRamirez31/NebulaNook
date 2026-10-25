@@ -62,6 +62,8 @@ export const NOTCH_W = 184;
 export const NOTCH_H = 32;
 export const COMPACT_W = 288; // NOTCH_W + 104
 export const EXPANDED_W = 640;
+export const TRACKING_H = 316;
+export const ACTIVITY_PEEK_H = 168;
 
 export const ROUNDED_CORNER = 14; // hidden / compact
 export const EXPANDED_CORNER = 22;
@@ -146,6 +148,7 @@ export function botPosition(
   view: IslandViewName,
   islandH: number,
   uploadProgress = 0,
+  tracking: boolean | "peek" = false,
 ): BotPlacement {
   switch (mode) {
     case "hidden":
@@ -153,6 +156,8 @@ export function botPosition(
     case "compact":
       return { cx: 40, cy: 16, diameter: 20, opacity: 1 };
     case "expanded": {
+      if (tracking === "peek" && view === "overview") return { cx: 68, cy: 100, diameter: 68, opacity: 1 };
+      if (tracking && view === "overview") return { cx: 64, cy: 104, diameter: 70, opacity: 1 };
       const layout = VIEW_LAYOUTS[view];
       if (view === "uploading") {
         return {

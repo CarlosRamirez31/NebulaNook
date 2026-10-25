@@ -17,6 +17,17 @@ import { Spotify, musicPlaying } from "./spotify";
 export type AgentSource = "claudeCode" | "n8n" | "agent";
 export type PillBadge = "approval" | "finished" | "error";
 
+export interface FilePreview { path: string; content: string; startLine?: number }
+export interface ActivityDetail {
+  tool: string;
+  phase: "read" | "edit" | "bash" | "other";
+  completed: boolean;
+  file?: FilePreview;
+  command?: string;
+  output?: string;
+  failed?: boolean;
+}
+
 export interface AgentTask {
   id: string;
   name: string;
@@ -24,6 +35,11 @@ export interface AgentTask {
   state: BotStateName;
   stepIndex: number;
   steps: string[];
+  /** Full activity since the user last dismissed it; the ticker keeps only 20. */
+  history?: string[];
+  historyDetails?: Record<number, ActivityDetail>;
+  sessionEnded?: boolean;
+  turnFinished?: boolean;
   /**
    * Position of the newest step in the whole session. `steps` is capped, so
    * `stepIndex` stops moving once it is full; this keeps counting.
@@ -197,14 +213,11 @@ export const DEFAULT_SETTINGS: Settings = {
 
 type Listener = () => void;
 
-/** Live diffs kept per pill (oldest dropped first) — same cap as macOS. */
-export const MAX_DIFFS_PER_PILL = 50;
-/** A pill's diffs are forgotten after an hour without a new one, as on macOS. */
-export const DIFF_TTL_MS = 3_600_000;
-
 class AppState {
   mode: IslandMode = "hidden";
   view: IslandViewName = "overview";
+  /** The small activity preview expands only after an explicit click. */
+  activityExpanded = false;
 
   tasks: AgentTask[] = [];
   focusId: string | null = null;
@@ -244,7 +257,6 @@ class AppState {
   planDetailIsCodex = false;
   /** Per-pill file diffs, in order of reception. Steps carry their ids. */
   sessionDiffs = new Map<string, FileDiff[]>();
-  private sessionDiffTimers = new Map<string, number>();
   /** Never reset, so an id can never point at a newer diff than the one tapped. */
   private nextDiffId = 0;
   /** Ctrl+↑ / Ctrl+↓: the highlighted row of the card's list (AppState.cardSelection). */
@@ -339,6 +351,8 @@ class AppState {
     const t = this.tasks.find((x) => x.id === id);
     if (!t) return;
     t.state = state;
+    if (state === "finished" || state === "error") t.turnFinished = true;
+    else if (state === "working" || state === "thinking") t.turnFinished = false;
     this.notify();
   }
 
@@ -346,6 +360,7 @@ class AppState {
     const t = this.tasks.find((x) => x.id === id);
     if (!t) return;
     const newest = t.stepSeq ?? t.steps.length - 1;
+    (t.history ??= []).push(step);
     t.steps.push(step);
     if (t.steps.length > 20) t.steps.shift();
     t.stepIndex = t.steps.length - 1;
@@ -360,20 +375,19 @@ class AppState {
     this.notify();
   }
 
+  setActivityDetail(id: string, detail: ActivityDetail, index?: number) {
+    const task = this.tasks.find((t) => t.id === id);
+    if (!task?.history?.length) return;
+    (task.historyDetails ??= {})[index ?? task.history.length - 1] = detail;
+    this.notify();
+  }
+
   /** Stores a diff for a pill and returns its id (for the ticker step). */
   appendSessionDiff(pillId: string, diff: FileDiff): number {
     const id = this.nextDiffId++;
     const list = this.sessionDiffs.get(pillId) ?? [];
     list.push({ ...diff, id });
-    while (list.length > MAX_DIFFS_PER_PILL) list.shift();
     this.sessionDiffs.set(pillId, list);
-    // One timer per pill, re-armed on every diff — nothing polls.
-    const prev = this.sessionDiffTimers.get(pillId);
-    if (prev != null) window.clearTimeout(prev);
-    this.sessionDiffTimers.set(
-      pillId,
-      window.setTimeout(() => this.clearSessionDiffs(pillId), DIFF_TTL_MS),
-    );
     return id;
   }
 
@@ -382,10 +396,25 @@ class AppState {
   }
 
   clearSessionDiffs(pillId: string) {
-    const timer = this.sessionDiffTimers.get(pillId);
-    if (timer != null) window.clearTimeout(timer);
-    this.sessionDiffTimers.delete(pillId);
     this.sessionDiffs.delete(pillId);
+  }
+
+  /** Dismiss only the visible record; never stop or approve the agent. */
+  dismissHistory(id: string) {
+    const task = this.tasks.find((t) => t.id === id);
+    if (!task) return;
+    task.history = [];
+    task.historyDetails = {};
+    task.turnFinished = false;
+    task.steps = [];
+    task.stepIndex = 0;
+    delete task.stepSeq;
+    task.finalLine = null;
+    task.pillBadge = null;
+    if (task.state === "finished" || task.state === "error") task.state = "idle";
+    this.clearSessionDiffs(id);
+    if (task.sessionEnded && !this.isKept(id)) this.removeTask(id);
+    else this.notify();
   }
 
   /** The always-on workspace pill, once the setting has been checked. */
@@ -438,6 +467,9 @@ class AppState {
     if (this.isKept(id)) {
       const t = this.tasks[idx];
       t.state = "idle";
+      t.history = [];
+      t.historyDetails = {};
+      t.sessionEnded = false;
       t.steps = [];
       t.stepIndex = 0;
       delete t.stepSeq;

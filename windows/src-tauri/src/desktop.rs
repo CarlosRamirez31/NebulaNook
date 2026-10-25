@@ -411,6 +411,7 @@ fn refresh_layer_display(app: &AppHandle, d: &Desktop) {
 /// Island-window client coordinates (logical) → the mode's space.
 fn from_island_client(app: &AppHandle, d: &Desktop, x: f64, y: f64) -> Option<(f64, f64)> {
     let island = island::window(app)?;
+    let (x, y) = (x * island::UI_SCALE, y * island::UI_SCALE);
     match d.mode {
         DesktopMode::Layer => {
             // The island is anchored to the top edge and centred.
@@ -989,7 +990,7 @@ mod tests {
         let zone = home_zone(960.0, 0.0, 1.5);
         assert!(zone.contains((960.0, 10.0)), "on the island");
         assert!(zone.contains((960.0 - 359.0 * 1.5, 300.0 * 1.5)), "inside the panel");
-        assert!(!zone.contains((960.0, 330.0 * 1.5)), "below the panel");
+        assert!(!zone.contains((960.0, (HOME_ZONE_H + 10.0) * 1.5)), "below the panel");
         assert!(!zone.contains((100.0, 10.0)), "top-left corner of the screen");
     }
 
