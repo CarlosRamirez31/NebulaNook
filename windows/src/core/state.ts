@@ -25,7 +25,10 @@ export interface ActivityDetail {
   file?: FilePreview;
   command?: string;
   output?: string;
+  processId?: string;
   failed?: boolean;
+  /** An exec envelope exposes intent, but cannot confirm each nested result. */
+  requestedDiff?: FileDiff;
 }
 
 export interface AgentTask {

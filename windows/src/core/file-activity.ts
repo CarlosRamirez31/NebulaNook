@@ -20,9 +20,54 @@ export function isFileEdit(tool: string, input?: Record<string, unknown>): boole
 export function activityPhase(tool: string, input: Record<string, unknown> = {}): "read" | "edit" | "bash" | "other" {
   if (isFileEdit(tool, input)) return "edit";
   const name = toolName(tool);
-  if (["read", "read_file", "view_file"].includes(name) || (name === "str_replace_editor" && input.command === "view")) return "read";
-  if (["bash", "shell", "terminal", "exec_command", "run_command", "powershell"].includes(name)) return "bash";
+  if (["read", "read_file", "view_file", "grep", "glob", "search", "list_dir", "ls"].includes(name) || (name === "str_replace_editor" && input.command === "view")) return "read";
+  // Shell reads are how Codex commonly inspects a project. Mixed commands stay
+  // terminal activity; this classification never executes or opens anything.
+  const command = input.command ?? input.cmd;
+  if (["bash", "shell", "exec_command", "run_command"].includes(name) && typeof command === "string" &&
+      command.split(/;|&&|\|\||\n|\|/).every((part) => /^\s*(?:cat|sed\s+-n|head|tail|rg|grep|ls|pwd|wc|find|stat|file|dotfiles-project-context\s+show|git\s+(?:status|diff))\b/.test(part)) &&
+      !/[>`]|\$\(/.test(command)) return "read";
+  if (["bash", "shell", "terminal", "exec_command", "run_command", "powershell", "exec", "wait", "write_stdin"].includes(name)) return "bash";
   return "other";
+}
+
+/** Decode literal calls in Codex's exec envelope, never evaluate JavaScript.
+ * Dynamic arguments remain opaque rather than inventing an applied change. */
+export function toolOperations(tool: string, raw: unknown): { tool: string; input: Record<string, unknown> }[] {
+  const input = fileInput(raw);
+  if (toolName(tool) !== "exec") return [];
+  const code = input.code ?? input.input ?? input.command ?? (typeof raw === "string" ? raw : undefined);
+  if (typeof code !== "string" || code.length > 256 * 1024) return [];
+  const operations: { tool: string; input: Record<string, unknown> }[] = [];
+  // Tokenize literals and comments as well as tool names so quoted examples
+  // cannot be mistaken for calls. Interpolated templates are deliberately opaque.
+  const tokens = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\/\/[^\n]*|\/\*[\s\S]*?\*\/|\btools\.(apply_patch|exec_command|write_stdin)\s*\(/g;
+  for (const token of code.matchAll(tokens)) {
+    if (!token[1]) continue;
+    const tail = code.slice(token.index! + token[0].length);
+    if (token[1] === "write_stdin") {
+      const process = /^\s*\{\s*(?:session_id|"session_id")\s*:\s*(\d+)\s*[,}]/.exec(tail);
+      if (process) operations.push({ tool: "write_stdin", input: { session_id: Number(process[1]) } });
+      continue;
+    }
+    const literal = token[1] === "apply_patch"
+      ? /^\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)\s*\)/.exec(tail)
+      : /^\s*\{\s*(?:cmd|"cmd"|'cmd')\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)\s*[,}]/.exec(tail);
+    if (!literal) continue;
+    const text = literal[1];
+    if (text[0] === "`" && text.includes("${")) continue;
+    let value: string;
+    try {
+      if (text[0] === '"') value = JSON.parse(text);
+      else value = text.slice(1, -1).replace(/\\(u[\da-fA-F]{4}|x[\da-fA-F]{2}|[\\'"`nrtbfv0]|\r?\n)/g, (_, escape: string) => {
+        if (escape[0] === "u" || escape[0] === "x") return String.fromCharCode(parseInt(escape.slice(1), 16));
+        return ({ n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", v: "\v", "0": "\0", "\n": "", "\r\n": "" } as Record<string, string>)[escape] ?? escape;
+      });
+    } catch { continue; }
+    operations.push({ tool: token[1], input: token[1] === "apply_patch" ? { patch: value } : { cmd: value } });
+    if (operations.length === 32) break;
+  }
+  return operations;
 }
 
 export function fileInput(raw: unknown): Record<string, unknown> {
@@ -43,6 +88,25 @@ export function filePath(input: Record<string, unknown>): string | null {
   return null;
 }
 
+/** A single literal file read can display its actual stdout as source. Never
+ * guess a file for pipelines, multiple commands, expansions or directory reads. */
+export function shellFilePreview(command: unknown, output: unknown, cwd = ""): FilePreview | undefined {
+  if (typeof command !== "string" || typeof output !== "string") return undefined;
+  let path: string | undefined;
+  let startLine = 1;
+  const cat = /^\s*cat\s+(?:--\s+)?(.+?)\s*$/.exec(command);
+  const sed = /^\s*sed\s+-n\s+['"]?(\d+)(?:,\d+)?p['"]?\s+(.+?)\s*$/.exec(command);
+  const head = /^\s*head\s+(?:-n\s+\d+\s+|-\d+\s+)?(.+?)\s*$/.exec(command);
+  if (cat) path = cat[1];
+  else if (sed) { path = sed[2]; startLine = Number(sed[1]); }
+  else if (head) path = head[1];
+  if (!path || !/^(?:"[^"\\$`\r\n]+"|'[^'\r\n]+'|[^\s;&|<>$`"'\\]+)$/.test(path)) return undefined;
+  if (path[0] === '"' || path[0] === "'") path = path.slice(1, -1);
+  if (path.startsWith("-") || startLine < 1) return undefined;
+  if (cwd && !/^(?:[\\/]|[A-Za-z]:[\\/])/.test(path)) path = `${cwd.replace(/[\\/]+$/, "")}/${path}`;
+  return { path, content: output.slice(0, 128 * 1024), startLine };
+}
+
 /** The known old text can be displayed while an edit runs, without applying it. */
 export function pendingPreview(tool: string, input: Record<string, unknown>): FilePreview | undefined {
   if (!isFileEdit(tool, input)) return undefined;
@@ -57,7 +121,7 @@ export function fileDiffs(tool: string, input: Record<string, unknown>): FileDif
   if (!isFileEdit(tool, input)) return [];
   const name = toolName(tool);
   if (name === "apply_patch" || name === "patch") {
-    const patch = input.patch ?? input.input ?? input.patchText;
+    const patch = input.patch ?? input.input ?? input.patchText ?? input.command;
     if (typeof patch === "string") return patchDiffs(patch);
     if (name === "apply_patch") return [];
   }

@@ -21,6 +21,7 @@ export const ICONS = {
   arrowClockwise: "M19 12a7 7 0 1 1-2.05-4.95M19 4.5V8h-3.5",
   // chevron.right
   chevronRight: "M9 5.5 15.5 12 9 18.5",
+  terminal: "M4 5h16v14H4z M7 9l3 3-3 3 M13 15h4",
   chevronLeft: "M15 5.5 8.5 12 15 18.5",
   // chevron.up
   chevronUp: "M5.5 15 12 8.5 18.5 15",

@@ -1,6 +1,39 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fileDiffs, fileInput, isFileEdit } from "../src/core/file-activity.ts";
+import { activityPhase, fileDiffs, fileInput, isFileEdit, shellFilePreview, toolOperations } from "../src/core/file-activity.ts";
+
+test("shell source previews use the actual output and a single unambiguous file", () => {
+  assert.deepEqual(shellFilePreview('cat "src/my file.cs"', 'class Todo {}', '/project'),
+    { path: '/project/src/my file.cs', content: 'class Todo {}', startLine: 1 });
+  assert.equal(shellFilePreview("sed -n '10,20p' src/Todo.cs", 'code').startLine, 10);
+  for (const command of ['cat a b', 'cat a; cat b', 'cat $(pwd)', 'cat a | head', 'cat -n a']) {
+    assert.equal(shellFilePreview(command, 'code'), undefined, command);
+  }
+});
+
+test("Cursor searches and Codex shell inspection are read activity", () => {
+  for (const tool of ["Read", "Grep", "Glob", "functions.read_file"]) assert.equal(activityPhase(tool), "read");
+  for (const cmd of ["rg --files", "cat a.ts; sed -n '1,20p' b.ts", "rg x src | head -20"]) {
+    assert.equal(activityPhase("functions.exec_command", { cmd }), "read", cmd);
+  }
+  for (const cmd of ["cat a.ts; npm test", "cat a > b", "sed -i 's/a/b/' a", "cat $(touch x)"]) {
+    assert.equal(activityPhase("exec_command", { cmd }), "bash", cmd);
+  }
+});
+
+test("Codex literal envelopes expose commands and patches without evaluating code", () => {
+  const patch = "*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new\n*** End Patch";
+  const code = `text(await tools.exec_command({cmd: "cat a.ts", max_output_tokens: 100})); text(await tools.apply_patch(${JSON.stringify(patch)}));`;
+  for (const raw of [code, { code }, { command: code }, JSON.stringify({ code })]) {
+    const ops = toolOperations("functions.exec", raw);
+    assert.deepEqual(ops.map((op) => op.tool), ["exec_command", "apply_patch"]);
+    assert.equal(ops[0].input.cmd, "cat a.ts");
+    assert.equal(fileDiffs(ops[1].tool, ops[1].input)[0].path, "a.ts");
+  }
+  for (const code of ['// tools.apply_patch("fake")', 'const x = `tools.apply_patch("fake")`', 'tools.apply_patch(patch)', 'tools.apply_patch(`text ${unknown}`)']) {
+    assert.deepEqual(toolOperations("exec", { code }), []);
+  }
+});
 
 test("file edits are independent of agent, namespace and file extension", () => {
   for (const tool of ["Edit", "functions.edit_file", "StrReplace", "replace", "patch", "str_replace_editor"]) {

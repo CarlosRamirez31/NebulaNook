@@ -3,11 +3,37 @@ import type { AgentTask, FilePreview } from "./state";
 
 export interface PreviewLine { text: string; number: number | null; kind: "context" | "added" | "removed" }
 
+/** Every known file has a real history position; tabs never open invented data. */
+export function activityFiles(task: AgentTask, diffs: readonly FileDiff[], selection = (task.history?.length ?? 0) - 1, phase?: "read" | "edit") {
+  const files = new Map<string, { path: string; index: number }>();
+  for (let index = 0; index <= selection; index++) {
+    const detail = task.historyDetails?.[index];
+    const parsed = parseDiffStep(task.history?.[index] ?? "");
+    if (phase && detail?.phase !== phase && !(phase === "edit" && parsed)) continue;
+    const path = detail?.file?.path ?? detail?.requestedDiff?.path ?? (parsed ? diffs.find((diff) => diff.id === parsed.diffId)?.path : undefined);
+    if (!path) continue;
+    const absolute = task.sessionCwd && !/^(?:[\\/]|[A-Za-z]:[\\/])/.test(path) ? `${task.sessionCwd}/${path}` : path;
+    files.set(absolute, { path, index });
+  }
+  return [...files.values()];
+}
+
+export function terminalHistory(task: AgentTask, selection = (task.history?.length ?? 0) - 1) {
+  return Object.entries(task.historyDetails ?? {}).filter(([index, detail]) =>
+    Number(index) <= selection && ["bash", "read"].includes(detail.phase) && (detail.command || detail.output) && !(detail.phase === "read" && detail.file)).map(([, detail]) => detail);
+}
+
 /** Both sizes show the same historical snapshot, including edits still running. */
-export function historyPreview(task: AgentTask, diffs: readonly FileDiff[], selection = (task.history?.length ?? 0) - 1) {
+export function historyPreview(task: AgentTask, diffs: readonly FileDiff[], selection = (task.history?.length ?? 0) - 1, phase?: "read" | "edit") {
   const history = task.history ?? [];
   let index = selection;
-  while (index >= 0 && !task.historyDetails?.[index]?.file && !parseDiffStep(history[index])) index--;
+  while (index >= 0) {
+    const detail = task.historyDetails?.[index];
+    const parsed = parseDiffStep(history[index]);
+    const matches = !phase || detail?.phase === phase || (phase === "edit" && !!parsed);
+    if (matches && (detail?.file || detail?.requestedDiff || parsed)) break;
+    index--;
+  }
   let file = task.historyDetails?.[index]?.file;
   if (file?.startLine === 0) {
     const pending = file;
@@ -17,12 +43,13 @@ export function historyPreview(task: AgentTask, diffs: readonly FileDiff[], sele
     if (previous) file = previous;
   }
   const selected = parseDiffStep(history[index] ?? "");
-  const diff = selected ? diffs.find((diff) => diff.id === selected.diffId) ?? null : null;
-  return { file, diff };
+  const requested = task.historyDetails?.[index]?.requestedDiff;
+  const diff = selected ? diffs.find((diff) => diff.id === selected.diffId) ?? null : requested ?? null;
+  return { file, diff, requested: !!requested };
 }
 
 /** Overlay confirmed diff hunks on the actual completed file, preserving line numbers. */
-export function previewLines(file: FilePreview | undefined, diff: FileDiff | null): PreviewLine[] {
+export function previewLines(file: FilePreview | undefined, diff: FileDiff | null, requested = false): PreviewLine[] {
   if (!file) return diff?.hunks.flatMap((hunk) => hunk.lines.map((line) => ({
     text: line.text, number: null, kind: line.kind,
   }))) ?? [];
@@ -34,7 +61,7 @@ export function previewLines(file: FilePreview | undefined, diff: FileDiff | nul
   const overlays: { start: number; count: number; rows: PreviewLine[] }[] = [];
   const unlocated: PreviewLine[] = [];
   for (const hunk of diff.hunks) {
-    const current = hunk.lines.filter((line) => line.kind !== "removed");
+    const current = hunk.lines.filter((line) => line.kind !== (requested ? "added" : "removed"));
     const matches: number[] = [];
     for (let start = 0; start <= text.length - current.length; start++) {
       if (current.every((line, offset) => text[start + offset] === line.text)) matches.push(start);

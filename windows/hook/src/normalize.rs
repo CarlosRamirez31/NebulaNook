@@ -63,6 +63,12 @@ fn non_empty_str<'a>(map: &'a Map<String, Value>, key: &str) -> Option<&'a str> 
 /// `env` reads an environment variable (a parameter so tests stay pure).
 pub fn fields(map: &mut Map<String, Value>, env: &dyn Fn(&str) -> Option<String>) {
     let tool_call = map.get("toolCall").and_then(Value::as_object).cloned();
+
+    if !map.contains_key("tool_response") {
+        if let Some(result) = map.get("toolResult").or_else(|| map.get("tool_result")).cloned() {
+            map.insert("tool_response".into(), result);
+        }
+    }
     let raw_event = non_empty_str(map, "hook_event_name").unwrap_or_default();
 
     // Cursor's permission hooks use a distinct shell payload.
@@ -117,6 +123,19 @@ pub fn fields(map: &mut Map<String, Value>, env: &dyn Fn(&str) -> Option<String>
             .is_some_and(|tool| matches!(tool.rsplit(['.', ':', '/']).next(), Some("apply_patch" | "patch")));
         if let Some(input) = parsed.or_else(|| patch_tool.then(|| serde_json::json!({ "patch": raw }))) {
             map.insert("tool_input".into(), input);
+        }
+    }
+
+    // Codex's native hooks put freeform patch/exec text in `command`.
+    // Canonicalize before the relay's ordinary command truncation runs.
+    let name = map.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    let name = name.rsplit(['.', ':', '/']).next().unwrap_or(name).to_lowercase();
+    if matches!(name.as_str(), "apply_patch" | "patch" | "exec") {
+        if let Some(input) = map.get_mut("tool_input").and_then(Value::as_object_mut) {
+            if let Some(command) = input.get("command").and_then(Value::as_str).map(str::to_string) {
+                let key = if name == "exec" { "code" } else { "patch" };
+                input.entry(key).or_insert(Value::String(command));
+            }
         }
     }
 

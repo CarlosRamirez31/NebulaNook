@@ -42,7 +42,7 @@ const DECISION_BUDGET: Duration = Duration::from_secs(110);
 
 /// Fields that are pointless to forward and can be enormous (a whole file read,
 /// a full command output). The island never shows them.
-const DROPPED_FIELDS: &[&str] = &["tool_response", "tool_output", "transcript_path"];
+const DROPPED_FIELDS: &[&str] = &["tool_response", "tool_output", "toolResult", "tool_result", "transcript_path"];
 /// Longest string forwarded for any single field; the island truncates to far
 /// less than this anyway.
 const MAX_FIELD_LEN: usize = 2_000;
@@ -60,7 +60,7 @@ const DIFF_TOOLS: &[&str] = &[
 const DIFF_FIELDS: &[&str] = &[
     "old_string", "new_string", "content", "contents", "file_text", "FileContent", "CodeContent",
     "old_str", "new_str", "oldText", "newText", "TargetContent", "ReplacementContent",
-    "old", "new", "patch", "input", "patchText",
+    "old", "new", "patch", "input", "patchText", "code",
 ];
 /// Per edit string. The island stops diffing at 200 KB anyway (DiffEngine).
 const MAX_DIFF_FIELD_LEN: usize = 256 * 1024;
@@ -295,7 +295,10 @@ fn truncate_payload(payload: &mut serde_json::Value, event: &str) {
         && payload
             .get("tool_name")
             .and_then(|v| v.as_str())
-            .is_some_and(|tool| DIFF_TOOLS.contains(&tool.rsplit(['.', ':', '/']).next().unwrap_or(tool).to_lowercase().as_str()));
+            .is_some_and(|tool| {
+                let name = tool.rsplit(['.', ':', '/']).next().unwrap_or(tool).to_lowercase();
+                name == "exec" || DIFF_TOOLS.contains(&name.as_str())
+            });
     let input = if keeps_diff {
         payload.as_object_mut().and_then(|map| map.remove("tool_input"))
     } else {
@@ -307,7 +310,11 @@ fn truncate_payload(payload: &mut serde_json::Value, event: &str) {
     if let Some(mut input) = input {
         let mut budget = MAX_DIFF_TOTAL;
         let mut cut_any = false;
-        cap_diff_strings(&mut input, &mut budget, &mut cut_any);
+        if let Value::String(code) = &mut input {
+            cut_any = cut(code, MAX_DIFF_FIELD_LEN);
+        } else {
+            cap_diff_strings(&mut input, &mut budget, &mut cut_any);
+        }
         if let Some(map) = payload.as_object_mut() {
             map.insert("tool_input".into(), input);
             if cut_any {
@@ -608,5 +615,45 @@ mod tests {
         truncate_payload(&mut multi, "PostToolUse");
         assert!(multi.to_string().len() < MAX_DIFF_TOTAL + 64 * 1024);
         assert_eq!(multi["coucou_diff_truncated"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn exec_envelopes_keep_bounded_code_for_literal_activity_detection() {
+        let code = format!("/*{}*/ tools.apply_patch(\"patch\")", "x".repeat(4000));
+        for input in [serde_json::json!({ "code": code }), serde_json::json!(code)] {
+            let raw = serde_json::json!({ "hook_event_name": "PreToolUse", "tool_name": "functions.exec", "tool_input": input });
+            let (v, _) = run(&raw.to_string(), "codex", "");
+            assert_eq!(v["tool_input"], input);
+        }
+        let mut huge = serde_json::json!({ "tool_name": "exec", "tool_input": { "code": "é".repeat(MAX_DIFF_FIELD_LEN) } });
+        truncate_payload(&mut huge, "PostToolUse");
+        assert_eq!(huge["coucou_diff_truncated"], true);
+        assert!(huge["tool_input"]["code"].as_str().unwrap().len() <= MAX_DIFF_FIELD_LEN + 4);
+    }
+
+    #[test]
+    fn native_agent_result_shapes_reach_the_shared_terminal_before_raw_output_is_dropped() {
+        for (agent, raw) in [
+            ("cursor", serde_json::json!({"hook_event_name":"postToolUse", "tool_name":"Shell", "tool_input":{"command":"npm test"}, "tool_output":"{\"stdout\":\"PASS tests/todo.test.ts\",\"exitCode\":0}"})),
+            ("copilot", serde_json::json!({"hook_event_name":"postToolUse", "toolName":"bash", "toolArgs":{"command":"npm test"}, "toolResult":{"stdout":"PASS tests/todo.test.ts"}})),
+            ("gemini", serde_json::json!({"hook_event_name":"AfterTool", "toolCall":{"name":"run_command","args":{"CommandLine":"npm test"}}, "tool_response":{"output":"PASS tests/todo.test.ts"}})),
+        ] {
+            let (value, event) = run(&raw.to_string(), agent, "");
+            assert_eq!(event.name, "PostToolUse", "{agent}");
+            assert_eq!(value["coucou_activity"]["terminal"]["command"], "npm test", "{agent}");
+            assert_eq!(value["coucou_activity"]["terminal"]["output"], "PASS tests/todo.test.ts", "{agent}");
+            assert!(value.get("toolResult").is_none());
+        }
+    }
+
+    #[test]
+    fn codex_native_command_patch_survives_the_command_cap_before_and_after_editing() {
+        let patch = format!("*** Begin Patch\n*** Update File: notes.md\n@@\n-before\n+{}\n*** End Patch", "x".repeat(5000));
+        for event in ["PreToolUse", "PostToolUse"] {
+            let raw = serde_json::json!({ "hook_event_name": event, "tool_name": "apply_patch", "tool_input": {"command": patch} });
+            let (value, _) = run(&raw.to_string(), "codex", "");
+            assert_eq!(value["tool_input"]["patch"], patch);
+            assert!(value.get("coucou_diff_truncated").is_none());
+        }
     }
 }

@@ -6091,6 +6091,45 @@
       "id": "Matikan pil lain untuk memberi tempat bagi WhatsApp (maksimal {max}).",
       "de": "Schalte eine andere Pill aus, um Platz für WhatsApp zu schaffen (höchstens {max}).",
       "tr": "WhatsApp’a yer açmak için başka bir hapı kapat (en fazla {max})."
+    },
+    "Pending": {
+      "zh-Hans": "待处理",
+      "hi": "लंबित",
+      "es": "Pendiente",
+      "ar": "قيد الانتظار",
+      "fr": "En attente",
+      "bn": "অপেক্ষমাণ",
+      "pt-BR": "Pendente",
+      "ru": "В ожидании",
+      "id": "Tertunda",
+      "de": "Ausstehend",
+      "tr": "Beklemede"
+    },
+    "Working": {
+      "zh-Hans": "正在处理",
+      "hi": "काम जारी है",
+      "es": "En proceso",
+      "ar": "جارٍ العمل",
+      "fr": "En cours",
+      "bn": "কাজ চলছে",
+      "pt-BR": "Em andamento",
+      "ru": "В процессе",
+      "id": "Sedang bekerja",
+      "de": "In Bearbeitung",
+      "tr": "Çalışıyor"
+    },
+    "Requested changes": {
+      "zh-Hans": "请求的更改",
+      "hi": "अनुरोधित बदलाव",
+      "es": "Cambios solicitados",
+      "ar": "التغييرات المطلوبة",
+      "fr": "Modifications demandées",
+      "bn": "অনুরোধ করা পরিবর্তন",
+      "pt-BR": "Alterações solicitadas",
+      "ru": "Запрошенные изменения",
+      "id": "Perubahan yang diminta",
+      "de": "Angeforderte Änderungen",
+      "tr": "İstenen değişiklikler"
     }
   }
 }

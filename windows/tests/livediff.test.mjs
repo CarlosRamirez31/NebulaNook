@@ -71,6 +71,49 @@ test("every integrated agent records ordinary file edits without opening the pan
   }
 });
 
+test("Codex native command-shaped patches render actual changed code instead of the history list", () => {
+  const dom = installFakeDom();
+  document.createDocumentFragment = dom.root;
+  const card = new ActivityCard({ dismiss() {}, open() {} });
+  const patch = "*** Begin Patch\n*** Update File: notes.md\n@@\n-before\n+after\n*** End Patch";
+  const payload = { coucou_agent: "codex", session_id: "native-patch", tool_use_id: "patch-1", tool_name: "apply_patch", tool_input: { command: patch } };
+  hook({ ...payload, hook_event_name: "PreToolUse" });
+  const agent = task("agent_codex");
+  card.sync(agent);
+  assert.ok(card.el.querySelector(".tracking-editor"));
+  assert.equal(card.el.querySelector(".activity-list"), null);
+  assert.match(card.el.querySelector(".tracking-file-tab").textContent, /notes.md/);
+  assert.match(card.el.querySelector(".removed").textContent, /before/);
+  assert.match(card.el.querySelector(".added").textContent, /after/);
+  assert.equal(Object.values(agent.historyDetails)[0].command, undefined);
+  assert.doesNotMatch(agent.steps.at(-1), /Begin Patch/);
+  assert.equal((card.el.textContent.match(/Codex/g) ?? []).length, 1);
+  hook({ ...payload, hook_event_name: "PostToolUse" });
+  card.sync(agent);
+  assert.equal(diffs("agent_codex").length, 1);
+  assert.match(card.el.querySelector(".tracking-code").textContent, /before/);
+  assert.match(card.el.querySelector(".tracking-code").textContent, /after/);
+});
+
+test("native shell reads show each file's numbered code and never the action history", () => {
+  const dom = installFakeDom();
+  document.createDocumentFragment = dom.root;
+  const card = new ActivityCard({ dismiss() {}, open() {} });
+  const payload = { coucou_agent: "codex", session_id: "native-read", tool_name: "Bash",
+    tool_input: { command: "cat one.cs; sed -n '1,20p' two.cs" },
+    coucou_activity: { files: [{path:"/p/one.cs",content:"class One {}\n"}, {path:"/p/two.cs",content:"class Two {}\n"}] } };
+  hook({ ...payload, hook_event_name: "PreToolUse" });
+  hook({ ...payload, hook_event_name: "PostToolUse" });
+  card.sync(task("agent_codex"));
+  assert.equal(card.el.querySelector(".activity-list"), null);
+  assert.equal(card.el.querySelector(".tracking-terminal"), null);
+  assert.equal(card.el.find(".tracking-file-tab").length, 2);
+  assert.match(card.el.querySelector(".tracking-code").textContent, /class Two/);
+  card.el.find(".tracking-file-tab")[0].fire("click");
+  assert.match(card.el.querySelector(".tracking-code").textContent, /class One/);
+  assert.equal(card.el.querySelector(".code-line-number").textContent, "1");
+});
+
 for (const agentId of [undefined, ...Object.keys(KNOWN_AGENTS)]) {
 test(`${agentId ?? "claude"}: Read, Edit, Bash and Done reach both tracking views`, () => {
   const dom = installFakeDom();
@@ -115,6 +158,16 @@ test(`${agentId ?? "claude"}: Read, Edit, Bash and Done reach both tracking view
   assert.equal(terminal.output, "PASS tests/notes.test.ts");
   hook({ ...base, hook_event_name: "Stop", last_assistant_message: "Done." });
   assert.equal(agent.turnFinished, true);
+  peek.sync(agent);
+  card.sync(agent);
+  assert.match(peek.el.querySelector(".peek-code").textContent, /npm test/);
+  assert.match(peek.el.querySelector(".peek-code").textContent, /PASS tests\/notes.test.ts/);
+  card.el.find(".tracking-stage")[3].fire("click");
+  assert.match(card.el.querySelector(".tracking-terminal").textContent, /PASS tests\/notes.test.ts/);
+  assert.equal(card.el.querySelector(".code-line"), null);
+  card.el.find(".tracking-stage")[1].fire("click");
+  assert.equal(card.el.querySelector(".tracking-terminal"), null);
+  assert.ok(card.el.querySelector(".tracking-file-tab"));
   assert.ok(shown.every(([kind]) => kind === "diff"));
 });
 }

@@ -4,6 +4,7 @@ import { ActivityCard } from "../src/views/activity.ts";
 import { DEFAULT_SETTINGS, State } from "../src/core/state.ts";
 import { fromEdit, makeDiffStep } from "../src/core/diff.ts";
 import { installFakeDom } from "./fakedom.mjs";
+import { commandTabName } from "../src/views/terminal.ts";
 
 let task, card, dismissed;
 const addEdit = (path) => {
@@ -54,27 +55,159 @@ test("the reference editor shows numbered syntax, real changes, phase status and
   State.updateTask(task.id, "finished");
   card.sync(task);
   assert.ok(card.el.querySelector(".tracking-sidebar"));
-  assert.equal(card.el.find(".tracking-stage").length, 4, "the reference rail contains Read, Edit, Bash and Done");
+  assert.equal(card.el.find(".tracking-stage").length, 5, "Read, Edit, Bash, Tests and Done have separate zones");
+  card.el.find(".tracking-stage")[3].fire("click");
   assert.equal(card.el.querySelector(".terminal-pass").textContent, "PASS");
   assert.match(card.el.querySelector(".terminal-output").textContent, /PASS tests\/invoice.test.ts/);
+  assert.equal(card.el.querySelector(".code-line"), null);
+  card.el.find(".tracking-stage")[1].fire("click");
+  assert.equal(card.el.querySelector(".tracking-terminal"), null);
   assert.equal(card.el.find(".code-line").filter((line) => line.classList.contains("added"))[0].querySelector(".code-line-number").textContent, "12");
   assert.ok(card.el.querySelector(".code-token-keyword"));
   assert.ok(card.el.querySelector(".code-token-number"));
   assert.equal(card.el.find(".tracking-stage").at(-1).classList.contains("completed"), true);
 });
 
-test("an edit in progress keeps the previously read full file instead of replacing it with a snippet", () => {
+test("Read keeps the full file while Edit shows only changed lines", () => {
   const path = "/project/invoice.ts";
   State.appendStep(task.id, "Read · invoice.ts");
   State.setActivityDetail(task.id, { tool: "Read", phase: "read", completed: true,
     file: { path, content: "import x from './types'\n\nconst TVA = 0.196" } });
   State.appendStep(task.id, "Edit · invoice.ts");
   State.setActivityDetail(task.id, { tool: "Edit", phase: "edit", completed: false,
-    file: { path, content: "const TVA = 0.196", startLine: 0 } });
+    file: { path, content: "const TVA = 0.196", startLine: 0 },
+    requestedDiff: fromEdit("const TVA = 0.196", "const TVA = 0.20", path) });
   card.sync(task);
-  assert.match(card.el.querySelector(".tracking-code").textContent, /import x from/);
+  assert.doesNotMatch(card.el.querySelector(".tracking-code").textContent, /import x from/);
   assert.match(card.el.querySelector(".tracking-code").textContent, /const TVA = 0.196/);
-  assert.equal(card.el.querySelector(".added"), null, "a requested edit must not be displayed as applied");
+  assert.match(card.el.querySelector(".tracking-code").textContent, /const TVA = 0.20/);
+  assert.equal(card.el.find(".context").length, 0);
+  card.el.find(".tracking-stage")[0].fire("click");
+  assert.match(card.el.querySelector(".tracking-code").textContent, /import x from/);
+  assert.equal(card.el.querySelector(".added"), null);
+});
+
+test("phases stay active between tool calls and pending when work moves on until Stop", () => {
+  task.state = "working";
+  State.appendStep(task.id, "Read · a.ts");
+  State.setActivityDetail(task.id, { tool: "Read", phase: "read", completed: true });
+  card.sync(task);
+  let [read, edit, , , done] = card.el.find(".tracking-stage");
+  assert.equal(read.classList.contains("active"), true);
+  assert.equal(read.classList.contains("completed"), false);
+  State.appendStep(task.id, "Edit · a.ts");
+  State.setActivityDetail(task.id, { tool: "Edit", phase: "edit", completed: false });
+  card.sync(task);
+  assert.equal(read.classList.contains("pending"), true);
+  assert.equal(read.classList.contains("active"), false);
+  assert.equal(edit.classList.contains("active"), true);
+  State.appendStep(task.id, "Read · b.ts");
+  State.setActivityDetail(task.id, { tool: "Read", phase: "read", completed: true });
+  card.sync(task);
+  assert.equal(read.classList.contains("active"), true);
+  assert.equal(edit.classList.contains("pending"), true);
+  State.updateTask(task.id, "finished");
+  card.sync(task);
+  assert.equal(read.classList.contains("completed"), true);
+  assert.equal(edit.classList.contains("completed"), true);
+  assert.equal(done.classList.contains("completed"), true);
+  assert.equal(edit.classList.contains("pending"), false);
+});
+
+test("an envelope's patch preview is labelled as requested rather than an applied diff", () => {
+  State.appendStep(task.id, "Edits · a.ts");
+  State.setActivityDetail(task.id, { tool: "apply_patch", phase: "edit", completed: false,
+    requestedDiff: fromEdit("old code", "requested code", "a.ts") });
+  card.sync(task);
+  assert.match(card.el.querySelector(".tracking-file-tab").getAttribute("title"), /Requested changes/);
+  assert.match(card.el.querySelector(".tracking-code").textContent, /old code/);
+  assert.match(card.el.querySelector(".tracking-code").textContent, /requested code/);
+  assert.equal(State.sessionDiffs.get(task.id)?.length ?? 0, 0);
+});
+
+test("file, command and test tabs stay confined to their own selected zone", () => {
+  addEdit("first.cs");
+  addEdit("second.cs");
+  for (const [command, output] of [["dotnet build", "Build succeeded."], ["dotnet test", "Passed! - Failed: 0, Passed: 3, Total: 3"]]) {
+    State.appendStep(task.id, command);
+    State.setActivityDetail(task.id, { tool: "Shell", phase: "bash", command, output, completed: true });
+  }
+  card.sync(task);
+  assert.equal(card.el.querySelector(".code-line"), null);
+  card.el.find(".tracking-stage")[1].fire("click");
+  const fileTabs = () => card.el.querySelector(".tracking-filebar").find(".tracking-file-tab");
+  assert.equal(fileTabs().length, 2);
+  assert.equal(card.el.querySelector(".tracking-terminal"), null);
+  fileTabs()[0].fire("click");
+  assert.match(card.el.querySelector(".tracking-code").textContent, /new first.cs/);
+  assert.equal(fileTabs().length, 2, "switching tabs keeps other files reachable");
+  fileTabs()[1].fire("click");
+  assert.match(card.el.querySelector(".tracking-code").textContent, /new second.cs/);
+  card.el.find(".tracking-stage")[2].fire("click");
+  assert.match(card.el.querySelector(".terminal-output").textContent, /Build succeeded/);
+  assert.equal(card.el.querySelector(".code-line"), null);
+  assert.doesNotMatch(card.el.querySelector(".terminal-output").textContent, /Passed: 3/);
+  assert.equal(card.el.find(".terminal-command-tab").length, 1);
+  card.el.find(".tracking-stage")[3].fire("click");
+  assert.match(card.el.querySelector(".terminal-output").textContent, /Passed: 3/);
+  assert.doesNotMatch(card.el.querySelector(".terminal-output").textContent, /Build succeeded/);
+  assert.equal(card.el.querySelector(".terminal-command"), null);
+});
+
+test("command tabs show script basenames while keeping the full command in the tooltip", () => {
+  for (const [command, label] of [
+    ["python3 /tmp/todo-net10-layers.py", "todo-net10-layers.py"],
+    ['bash "/tmp/my script.sh"', "my script.sh"],
+    ["node --import ./tests/setup.mjs --test tests/activity.test.mjs", "activity.test.mjs"],
+    ["dotnet test", "dotnet test"],
+    ["npm run build", "npm run build"],
+    ["python3 -c 'print(42)'", "python3"],
+  ]) assert.equal(commandTabName(command), label);
+  State.appendStep(task.id, "python3 /tmp/scripts/check.py");
+  State.setActivityDetail(task.id, { tool: "Bash", phase: "bash", command: "python3 /tmp/scripts/check.py", output: "done", completed: true });
+  card.sync(task);
+  const tab = card.el.querySelector(".terminal-command-tab");
+  assert.equal(tab.textContent, "check.py");
+  assert.equal(tab.getAttribute("title"), "python3 /tmp/scripts/check.py");
+  assert.equal(card.el.querySelector(".terminal-command-tabs").getAttribute("role"), "tablist");
+});
+
+test("overflowing command tabs scroll horizontally without changing the selected output", () => {
+  for (let index = 0; index < 20; index++) {
+    const command = `python3 /tmp/scripts/check-${index}.py`;
+    State.appendStep(task.id, command);
+    State.setActivityDetail(task.id, { tool: "Bash", phase: "bash", command, output: `result ${index}`, completed: true });
+  }
+  card.sync(task);
+  const tabs = card.el.querySelector(".terminal-command-tabs");
+  tabs.scrollWidth = 2000;
+  tabs.clientWidth = 300;
+  tabs.scrollLeft = 0;
+  const wheel = { deltaX: 0, deltaY: 140, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+  tabs.listeners.get("wheel")[0](wheel);
+  assert.equal(tabs.scrollLeft, 140);
+  assert.equal(wheel.defaultPrevented, true);
+  assert.match(card.el.querySelector(".terminal-output").textContent, /result 19/);
+  assert.equal(card.el.find(".terminal-command-tab").at(-1).getAttribute("aria-selected"), "true");
+});
+
+test("reported checkmarks render as small vector status icons", () => {
+  State.appendStep(task.id, "node --test");
+  State.setActivityDetail(task.id, { tool: "Shell", phase: "bash", command: "node --test", output: "✔ Tests.Todo\n✖ Tests.Error", completed: true });
+  card.sync(task);
+  assert.equal(card.el.find(".terminal-status").length, 2);
+  assert.equal(card.el.querySelector(".is-passed").children[0].getAttribute("viewBox"), "0 0 24 24");
+  assert.equal(card.el.querySelector(".is-failed").children[0].getAttribute("viewBox"), "0 0 24 24");
+});
+
+test("shell-only activity shows output instead of an empty file list", () => {
+  State.appendStep(task.id, "dotnet test");
+  State.setActivityDetail(task.id, { tool: "Shell", phase: "bash", command: "dotnet test", completed: true,
+    failed: true, output: "Failed! - Failed: 1, Passed: 2, Total: 3" });
+  card.sync(task);
+  assert.ok(card.el.querySelector(".terminal-only"));
+  assert.ok(card.el.querySelector(".terminal-fail"));
+  assert.match(card.el.textContent, /Failed: 1, Passed: 2/);
 });
 
 test("new edits do not move a user who is reviewing an earlier step", () => {

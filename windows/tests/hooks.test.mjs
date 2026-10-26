@@ -26,6 +26,49 @@ const hook = (payload) => emit("hook", payload);
 const task = (id = CLAUDE) => State.tasks.find((t) => t.id === id);
 const seconds = (n) => mock.timers.tick(n * 1000);
 
+test("Codex envelopes show requested patch code while reserving applied diffs for confirmed tools", () => {
+  const patch = "*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new\n*** End Patch";
+  const payload = { coucou_agent: "codex", session_id: "envelope", tool_use_id: "exec-1", tool_name: "exec",
+    tool_input: { code: `text(await tools.exec_command({cmd: "cat a.ts"})); text(await tools.apply_patch(${JSON.stringify(patch)}));` } };
+  hook({ ...payload, hook_event_name: "PreToolUse" });
+  const agent = task("agent_codex");
+  assert.deepEqual(Object.values(agent.historyDetails).map((detail) => detail.phase), ["read", "edit"]);
+  assert.equal(agent.historyDetails[1].requestedDiff.path, "a.ts");
+  hook({ ...payload, tool_input: undefined, hook_event_name: "PostToolUse" });
+  assert.equal(agent.historyDetails[0].completed, true);
+  assert.equal(agent.historyDetails[1].completed, true);
+  assert.equal(State.sessionDiffs.get(agent.id)?.length ?? 0, 0);
+});
+
+test("out of order post events finish their own read record without file previews", () => {
+  const payload = { coucou_agent: "cursor", session_id: "reads", tool_name: "Read" };
+  hook({ ...payload, hook_event_name: "PreToolUse", tool_use_id: "one", tool_input: { path: "one.ts" } });
+  hook({ ...payload, hook_event_name: "PreToolUse", tool_use_id: "two", tool_input: { path: "two.ts" } });
+  hook({ ...payload, hook_event_name: "PostToolUse", tool_use_id: "one" });
+  const details = task("agent_cursor").historyDetails;
+  assert.equal(details[0].completed, true);
+  assert.equal(details[1].completed, false);
+  hook({ ...payload, hook_event_name: "PostToolUse", tool_use_id: "two" });
+  assert.equal(details[1].completed, true);
+});
+
+test("an exec envelope keeps its actual test transcript and subsequent process output", () => {
+  const payload = { coucou_agent: "codex", session_id: "test-output", tool_use_id: "run", tool_name: "exec",
+    tool_input: { code: 'text(await tools.exec_command({cmd: "dotnet test"}));' } };
+  hook({ ...payload, hook_event_name: "PreToolUse" });
+  hook({ ...payload, hook_event_name: "PostToolUse", coucou_activity: { terminal: { processId: "77", output: "Starting tests", failed: false } } });
+  const agent = task("agent_codex");
+  const record = Object.values(agent.historyDetails).at(-1);
+  assert.equal(record.command, "dotnet test");
+  assert.equal(record.output, "Starting tests");
+  const poll = { ...payload, tool_use_id: "poll", tool_input: { code: 'text(await tools.write_stdin({session_id:77,chars:""}));' } };
+  hook({ ...poll, hook_event_name: "PreToolUse" });
+  hook({ ...poll, hook_event_name: "PostToolUse", coucou_activity: { terminal: { processId: "77", output: "Passed! - Passed: 48", failed: false } } });
+  const records = Object.values(agent.historyDetails);
+  assert.equal(records.filter((detail) => detail.command === "dotnet test").length, 1);
+  assert.match(records[0].output, /Starting tests\nPassed!/);
+});
+
 beforeEach(() => {
   setLanguage("en");
   mock.timers.enable({ apis: ["setTimeout"] });

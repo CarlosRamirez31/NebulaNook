@@ -7,7 +7,7 @@
 
 import { Bridge, onEvent } from "../core/bridge";
 import { fileName, makeDiffStep, parseDiffStep, toOneLine } from "../core/diff";
-import { activityPhase, fileDiffs, fileInput, filePath, isFileEdit, pendingPreview, toolName } from "../core/file-activity";
+import { activityPhase, fileDiffs, fileInput, filePath, isFileEdit, pendingPreview, shellFilePreview, toolName, toolOperations } from "../core/file-activity";
 import { Sound } from "../core/sound";
 import { State, type AgentTask, type AskedQuestion, type FilePreview } from "../core/state";
 import { pillDefinition } from "../core/pills";
@@ -63,7 +63,9 @@ interface HookPayload {
   tool_use_id?: string;
   tool_call_id?: string;
   call_id?: string;
-  coucou_activity?: { files?: FilePreview[]; terminal?: { command?: string; output?: string; failed?: boolean } };
+  activity_index?: number;
+  coucou_envelope?: boolean;
+  coucou_activity?: { files?: FilePreview[]; terminal?: { command?: string; output?: string; failed?: boolean; processId?: string } };
   /** Set by the relay when an edit was too big to forward whole (> 256 KB). */
   coucou_diff_truncated?: boolean;
   /** Optional agent tag: lowercase, digits and hyphens, ≤ 24 chars. */
@@ -125,9 +127,16 @@ function stepLabel(tool: string, input: Record<string, unknown>): string {
   const labelTool = tool === "ask_question" || tool.endsWith(":ask_question") ? "ask_question" : tool;
   const base = toolName(tool);
   const label = TOOL_LABELS[labelTool] ? t(TOOL_LABELS[labelTool]) : isFileEdit(tool, input) ? t("Edits")
-    : ["read", "read_file", "view_file"].includes(base) ? t("Reads")
+    : activityPhase(tool, input) === "read" ? t("Reads")
     : ["exec_command", "terminal", "shell", "bash", "run_command"].includes(base) ? t("Runs") : tool;
   const str = (k: string) => (typeof input[k] === "string" ? (input[k] as string) : null);
+  if (["apply_patch", "patch"].includes(base)) {
+    const patch = input.patch ?? input.input ?? input.patchText ?? input.command;
+    if (typeof patch === "string") {
+      const path = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/m.exec(patch)?.[1];
+      if (path) return `${label} · ${lastPathComponent(path)}`;
+    }
+  }
   const cmd = str("command") ?? str("cmd");
   if (cmd) return `${label} · ${cmd.slice(0, 40)}`;
   const path = str("path");
@@ -268,7 +277,7 @@ function trackFileCall(agent: string, session: string, event: string, payload: H
   }
   const tool = toolName(payload.tool_name ?? "");
   const id = payload.tool_use_id ?? payload.tool_call_id ?? payload.call_id;
-  if (event === "PreToolUse" && activityPhase(tool, fileInput(payload.tool_input)) !== "other") {
+  if (event === "PreToolUse" && (tool === "exec" || activityPhase(tool, fileInput(payload.tool_input)) !== "other")) {
     if (editingCalls.length >= 64) editingCalls.shift();
     editingCalls.push({ agent, session, tool, id, payload, at: now, owner: State.tasks.find((task) => task.id === agent) });
   }
@@ -277,9 +286,9 @@ function trackFileCall(agent: string, session: string, event: string, payload: H
   if (matches.length !== 1) return payload;
   const call = matches[0];
   editingCalls.splice(editingCalls.indexOf(call), 1);
-  return Object.keys(fileInput(payload.tool_input)).length ? payload : {
-    ...payload, tool_input: call.payload.tool_input, coucou_diff_truncated: payload.coucou_diff_truncated || call.payload.coucou_diff_truncated,
-  };
+  return { ...payload, activity_index: call.payload.activity_index,
+    tool_input: Object.keys(fileInput(payload.tool_input)).length ? payload.tool_input : call.payload.tool_input,
+    coucou_diff_truncated: payload.coucou_diff_truncated || call.payload.coucou_diff_truncated };
 }
 
 export function registerHookHandlers(island: Island) {
@@ -319,6 +328,29 @@ function handleHook(island: Island, payload: HookPayload) {
   const isExternalAgent = validAgent !== null;
   const sessionId = payload.session_id ?? "";
   if (name !== "PreToolUse") payload = trackFileCall(agentId, sessionId, name, payload);
+
+  if (["PreToolUse", "PostToolUse", "PostToolUseFailure"].includes(name) && !payload.coucou_diff_truncated) {
+    const operations = toolOperations(payload.tool_name ?? "", payload.tool_input);
+    if (operations.length) {
+      const singleTerminal = operations.length === 1 && ["bash", "read"].includes(activityPhase(operations[0].tool, operations[0].input));
+      operations.forEach((operation, index) => {
+        const parent = payload.tool_use_id ?? payload.tool_call_id ?? payload.call_id;
+        handleHook(island, { ...payload, tool_name: operation.tool, tool_input: operation.input,
+          // The outer output belongs to the envelope, not an individual call.
+          coucou_activity: singleTerminal ? payload.coucou_activity : undefined, coucou_envelope: true,
+          tool_use_id: parent ? `${parent}:${index}` : undefined });
+      });
+      if (!singleTerminal && payload.coucou_activity?.terminal?.output) {
+        // Keep the envelope's actual transcript together. It does not prove
+        // that every nested operation succeeded individually.
+        handleHook(island, { ...payload, tool_name: "Bash", coucou_envelope: true,
+          tool_input: { command: operations.filter((op) => typeof op.input.cmd === "string").map((op) => op.input.cmd).join("\n") || "exec" },
+          tool_use_id: undefined, tool_call_id: undefined, call_id: undefined });
+      }
+      if (name === "PreToolUse") trackFileCall(agentId, sessionId, name, payload);
+      return;
+    }
+  }
 
   const followEditing = (diffId: number | null) => {
     if (State.pendingApproval) return;
@@ -410,6 +442,16 @@ function handleHook(island: Island, payload: HookPayload) {
       supersedeStop();
       clearFinalLine(agentId);
       const tool = payload.tool_name ?? "Tool";
+      if (toolName(tool) === "write_stdin") {
+        const processId = String(fileInput(payload.tool_input).session_id ?? "");
+        const task = State.tasks.find((task) => task.id === agentId);
+        const previous = Object.entries(task?.historyDetails ?? {}).find(([, detail]) => detail.processId === processId);
+        if (previous) {
+          payload.activity_index = Number(previous[0]);
+          State.updateTask(agentId, "working");
+          break;
+        }
+      }
       const isQuestion = tool === "ask_question" || tool.endsWith(":ask_question");
       if (isQuestion) {
         State.updateTask(agentId, "question");
@@ -425,9 +467,18 @@ function handleHook(island: Island, payload: HookPayload) {
         surface("overview", false);
       }
       const input = fileInput(payload.tool_input);
-      State.setActivityDetail(agentId, { tool, phase: activityPhase(tool, input), completed: false,
-        file: pendingPreview(tool, input),
-        command: typeof (input.command ?? input.cmd) === "string" ? String(input.command ?? input.cmd) : undefined });
+      const phase = activityPhase(tool, input);
+      State.setActivityDetail(agentId, { tool, phase, completed: false,
+        file: payload.coucou_activity?.files?.[0] ?? pendingPreview(tool, input) ?? shellFilePreview(input.command ?? input.cmd, "", cwd),
+        requestedDiff: !payload.coucou_diff_truncated ? fileDiffs(tool, input)[0] : undefined,
+        command: ["bash", "read"].includes(phase) && typeof (input.command ?? input.cmd) === "string" ? String(input.command ?? input.cmd) : undefined });
+      if (!payload.coucou_diff_truncated) {
+        for (const diff of fileDiffs(tool, input).slice(1)) {
+          State.appendStep(agentId, stepLabel(tool, { file_path: diff.path }));
+          State.setActivityDetail(agentId, { tool, phase: "edit", completed: false, requestedDiff: diff });
+        }
+      }
+      payload.activity_index = (State.tasks.find((task) => task.id === agentId)?.history?.length ?? 0) - 1;
       break;
     }
 
@@ -447,12 +498,17 @@ function handleHook(island: Island, payload: HookPayload) {
       {
         const task = State.tasks.find((t) => t.id === agentId);
         const first = task?.history?.length ?? 0;
-        const diffId = recordDiff(agentId, payload);
+        const diffId = payload.coucou_envelope ? null : recordDiff(agentId, payload);
         const tool = payload.tool_name ?? "";
         const input = fileInput(payload.tool_input);
         const phase = activityPhase(tool, input);
+        if (payload.activity_index != null && task?.historyDetails?.[payload.activity_index]) {
+          State.setActivityDetail(agentId, { ...task.historyDetails[payload.activity_index], completed: true }, payload.activity_index);
+        }
         const files = (Array.isArray(payload.coucou_activity?.files) ? payload.coucou_activity.files : [])
           .filter((file) => typeof file?.path === "string" && typeof file?.content === "string" && file.content.length <= 128 * 1024);
+        const shellFile = phase === "read" ? shellFilePreview(input.command ?? input.cmd, payload.coucou_activity?.terminal?.output, cwd) : undefined;
+        if (shellFile && !files.length) files.push(shellFile);
         const assigned = new Set<FilePreview>();
         for (let index = first; index < (task?.history?.length ?? 0); index++) {
           const entry = parseDiffStep(task!.history![index]);
@@ -466,16 +522,26 @@ function handleHook(island: Island, payload: HookPayload) {
           State.setActivityDetail(agentId, { tool, phase, completed: true, file });
         }
         const terminal = payload.coucou_activity?.terminal;
-        if (phase === "bash") {
+        if (phase === "bash" || (phase === "read" && typeof (input.command ?? input.cmd) === "string")) {
           const command = terminal?.command || String(input.command ?? input.cmd ?? "");
-          let index = (task?.history?.length ?? 0) - 1;
-          while (index >= 0 && !(task?.historyDetails?.[index]?.phase === "bash" && task.historyDetails[index].command === command)) index--;
+          const process = terminal?.processId ?? (toolName(tool) === "write_stdin" ? String(input.session_id ?? "") : undefined);
+          const previous = process ? Object.entries(task?.historyDetails ?? {}).find(([, detail]) => detail.processId === process) : undefined;
+          let index = previous ? Number(previous[0]) : payload.activity_index ?? (task?.history?.length ?? 0) - 1;
+          if (!previous && payload.activity_index == null) {
+            while (index >= 0 && !(task?.historyDetails?.[index]?.phase === phase && task.historyDetails[index].command === command)) index--;
+          }
           if (index < 0 && (command || terminal?.output)) {
             State.appendStep(agentId, stepLabel(tool, { command }));
             index = (task?.history?.length ?? 0) - 1;
           }
-          if (index >= 0) State.setActivityDetail(agentId, { tool, phase, completed: true, command,
-            output: typeof terminal?.output === "string" ? terminal.output.slice(0, 4000) : undefined, failed: terminal?.failed === true }, index);
+          if (index >= 0) {
+            const old = task?.historyDetails?.[index];
+            const output = typeof terminal?.output === "string" ? terminal.output : "";
+            State.setActivityDetail(agentId, { ...old, tool, phase, completed: true,
+              command: previous ? old?.command : command, processId: process,
+              output: `${old?.output ?? ""}${old?.output && output ? "\n" : ""}${output}`.slice(-16_000),
+              failed: terminal?.failed === true }, index);
+          }
         }
         if (diffId != null) followEditing(diffId);
         else if (files.length || phase === "bash") followEditing(null);
@@ -488,7 +554,7 @@ function handleHook(island: Island, payload: HookPayload) {
       State.appendStep(agentId, t("⚠ failed"));
       State.setActivityDetail(agentId, { tool: payload.tool_name ?? "", phase: activityPhase(payload.tool_name ?? "", fileInput(payload.tool_input)),
         completed: true, failed: true, command: payload.coucou_activity?.terminal?.command,
-        output: payload.coucou_activity?.terminal?.output?.slice(0, 4000) });
+        output: payload.coucou_activity?.terminal?.output?.slice(-16_000) });
       break;
 
     case "Notification": {

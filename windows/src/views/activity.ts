@@ -1,11 +1,16 @@
-import { State, type AgentTask } from "../core/state";
+import { State, type ActivityDetail, type AgentTask } from "../core/state";
 import { parseDiffStep } from "../core/diff";
 import { fileName } from "../core/diff";
-import { codeTokens, historyPreview, previewLines } from "../core/code-preview";
-import { agentName } from "../island/agents";
+import { activityFiles, codeTokens, historyPreview, previewLines, terminalHistory } from "../core/code-preview";
 import { clear, h, svg } from "./dom";
 import { ICONS } from "./icons";
 import { language, t, tl } from "../i18n/i18n";
+import { commandTabName, isTestRun, terminalOutput } from "./terminal";
+
+function detailPhase(detail?: ActivityDetail, step = ""): string {
+  if (detail?.phase === "bash" && isTestRun(detail.command, detail.output)) return "test";
+  return detail?.phase ?? (parseDiffStep(step) ? "edit" : "other");
+}
 
 /** Complete, browsable activity. Closing a diff returns to the list; X discards it. */
 export class ActivityCard {
@@ -16,12 +21,13 @@ export class ActivityCard {
   private next: HTMLButtonElement;
   private task: AgentTask | null = null;
   private selection = -1;
+  private terminalSelection: number | null = null;
+  private section: string | null = null;
   private following = true;
   private detail = true;
   private rendered = "";
   private record: string[] | undefined;
   private project = h("button", { class: "activity-list-toggle", title: tl("History") });
-  private agent = h("div", { class: "tracking-agent" });
   private stages = h("div", { class: "tracking-stages" });
   private phaseButtons = new Map<string, HTMLButtonElement>();
   private hooks: { dismiss(id: string): void; open(path: string): void; fold?(): void };
@@ -32,6 +38,7 @@ export class ActivityCard {
       const history = this.task?.history ?? [];
       this.selection = Math.max(0, Math.min(history.length - 1, this.selection + delta));
       this.following = false;
+      this.section = null;
       this.detail = true;
       this.rendered = "";
       this.render();
@@ -44,12 +51,13 @@ export class ActivityCard {
       this.rendered = "";
       this.render();
     });
-    for (const [phase, label] of [["read", "Read"], ["edit", tl("Edit")], ["bash", "Bash"], ["done", tl("Done")]] as const) {
+    for (const [phase, label] of [["read", "Read"], ["edit", tl("Edit")], ["bash", "Bash"], ["test", tl("Tests")], ["done", tl("Done")]] as const) {
       const button = h("button", { class: "tracking-stage", onclick: () => {
         const history = this.task?.history ?? [];
         let index = history.length - 1;
-        if (phase !== "done") while (index >= 0 && this.task?.historyDetails?.[index]?.phase !== phase && !(phase === "edit" && parseDiffStep(history[index]))) index--;
+        if (phase !== "done") while (index >= 0 && detailPhase(this.task?.historyDetails?.[index], history[index]) !== phase) index--;
         if (index < 0) return;
+        this.section = phase; this.terminalSelection = null;
         this.selection = index; this.following = false; this.detail = true; this.rendered = ""; this.render();
       } }, h("span", { class: "tracking-stage-icon" }), h("span", { text: label }));
       this.phaseButtons.set(phase, button);
@@ -66,7 +74,7 @@ export class ActivityCard {
     const fold = hooks.fold ? h("button", { class: "icon-btn activity-fold", title: tl("Back"), onclick: () => hooks.fold?.() }, svg(ICONS.chevronUp, 9)) : null;
     this.el = h("div", { class: "activity-card tracking-card" },
       h("aside", { class: "tracking-sidebar" },
-        h("div", { class: "tracking-identity" }, this.project, this.agent), this.stages,
+        h("div", { class: "tracking-identity" }, this.project), this.stages,
         h("div", { class: "activity-head" }, this.previous, this.count, this.next, fold, dismiss)), this.body);
 
   }
@@ -74,6 +82,8 @@ export class ActivityCard {
   sync(task: AgentTask) {
     if (task.id !== this.task?.id || task.history !== this.record) {
       this.selection = -1;
+      this.terminalSelection = null;
+      this.section = null;
       this.following = true;
       this.detail = true;
       this.rendered = "";
@@ -98,6 +108,7 @@ export class ActivityCard {
   }
 
   toggleDiff() {
+    this.section = null;
     if (this.detail) this.detail = false;
     else {
       const history = this.task?.history ?? [];
@@ -121,43 +132,71 @@ export class ActivityCard {
     this.previous.disabled = this.selection <= 0;
     this.next.disabled = this.selection >= history.length - 1;
     this.project.textContent = task.name;
-    this.agent.textContent = task.id.startsWith("agent_") ? agentName(task.id.slice(6)) : "Claude Code";
     const details = Object.values(task.historyDetails ?? {});
     const done = task.turnFinished || task.sessionEnded || task.state === "finished";
-    const active = done ? "done" : details.at(-1)?.phase;
-    const viewing = task.historyDetails?.[this.selection]?.phase ?? (parseDiffStep(history[this.selection] ?? "") ? "edit" : done ? "done" : null);
+    const active = done ? "done" : detailPhase(details.filter((detail) => detail.phase !== "other").at(-1));
+    const viewing = this.section ?? detailPhase(task.historyDetails?.[this.selection], history[this.selection] ?? "");
     for (const [phase, button] of this.phaseButtons) {
-      const last = details.filter((detail) => detail.phase === phase).at(-1);
-      const completed = phase === "done" ? !!done : last?.completed || (phase === "edit" && history.some((step) => parseDiffStep(step)));
+      const last = details.filter((detail) => detailPhase(detail) === phase).at(-1);
+      const seen = !!last || (phase === "edit" && history.some((step) => parseDiffStep(step)));
+      const completed = !!done && (phase === "done" || seen) && !last?.failed;
+      const pending = !done && seen && phase !== active;
       button.classList.toggle("completed", !!completed);
-      button.classList.toggle("active", phase === active && !completed);
+      button.classList.toggle("active", phase === active && !done && !last?.failed);
+      button.classList.toggle("pending", pending && !last?.failed);
+      button.setAttribute("title", last?.failed ? t("Failed") : completed ? t("Done") : pending ? t("Pending") : phase === active ? t("Working") : t("Pending"));
       button.classList.toggle("viewing", !this.following && phase === viewing);
       button.classList.toggle("is-failed", !!last?.failed);
       const icon = button.querySelector(".tracking-stage-icon")!;
-      icon.textContent = completed ? "✓" : phase === "bash" ? "▣" : "";
+      icon.textContent = last?.failed ? "!" : completed ? "✓" : pending ? "·" : phase === "bash" ? "▣" : "";
     }
-    const terminal = Object.entries(task.historyDetails ?? {}).filter(([index, detail]) => Number(index) <= this.selection && detail.phase === "bash").at(-1)?.[1];
+    const terminals = terminalHistory(task, this.selection);
     const selectedDetail = task.historyDetails?.[this.selection];
+    const zone = this.section ?? (this.following && done ? "done" : detailPhase(selectedDetail, history[this.selection] ?? ""));
     // Keep a historical editor's DOM and scroll position while unrelated steps
     // arrive. The counter and live phase indicators above still update.
     const progress = this.detail
-      ? `${selectedDetail?.completed}~${selectedDetail?.failed}~${terminal?.output ?? ""}`
+      ? `${selectedDetail?.completed}~${selectedDetail?.failed}~${terminals.slice(-20).map((entry) => `${entry.command}:${entry.output}:${entry.failed}`).join("~")}`
       : `${task.state}~${history.length}~${details.filter((detail) => detail.completed).length}`;
-    const key = `${language()}~${task.id}~${this.selection}~${this.detail}~${progress}`;
+    const key = `${language()}~${task.id}~${this.selection}~${this.detail}~${zone}~${progress}`;
     if (key === this.rendered) return;
     this.rendered = key;
     clear(this.body);
-    const { file, diff } = historyPreview(task, State.sessionDiffs.get(task.id) ?? [], this.selection);
+    if (this.detail && (zone === "bash" || zone === "test")) {
+      this.renderTerminal(terminals.filter((entry) => entry.phase === "bash" && isTestRun(entry.command, entry.output) === (zone === "test")), zone === "test");
+      return;
+    }
+    if (this.detail && zone === "done") {
+      this.body.append(h("div", { class: "tracking-editor diff-card" }, h("div", { class: "tracking-code" },
+        terminalOutput(task.finalLine || history.at(-1) || t("No detail available."), task.state === "error"))));
+      return;
+    }
+    const phase = zone === "read" || zone === "edit" ? zone : undefined;
+    const { file, diff, requested } = historyPreview(task, State.sessionDiffs.get(task.id) ?? [], this.selection, phase);
+    if (this.detail && phase && !file && !diff) {
+      if (phase === "read") {
+        const reads = terminalHistory(task, this.selection).filter((entry) => entry.phase === "read");
+        if (reads.length) { this.renderTerminal(reads, false); return; }
+      }
+      this.body.append(h("div", { class: "tracking-editor diff-card" },
+        h("div", { class: "tracking-code" }, terminalOutput(t("No detail available.")))));
+      return;
+    }
     if (this.detail && (file || diff)) {
-      const path = file?.path ?? diff!.path;
-      const extension = path.split(".").at(-1)?.toLowerCase() ?? "";
+      const path = file?.path ?? diff?.path ?? "";
       const relative = task.sessionCwd && path.startsWith(`${task.sessionCwd}/`) ? path.slice(task.sessionCwd.length + 1) : path;
-      const fileButton = h("button", { class: "tracking-file-tab", title: tl("History"), onclick: () => {
-        this.detail = false; this.following = false; this.rendered = ""; this.render();
-      } }, h("span", { class: `tracking-language lang-${extension}`, text: extension.slice(0, 4).toUpperCase() || "FILE" }),
-      h("span", { text: fileName(path) }), h("span", { class: "tracking-edit-dot" }));
+      const tabs = h("div", { class: "tracking-file-tabs" });
+      for (const entry of activityFiles(task, State.sessionDiffs.get(task.id) ?? [], undefined, phase)) {
+        const ext = entry.path.split(".").at(-1)?.toLowerCase() ?? "";
+        const selected = entry.path === path;
+        tabs.append(h("button", { class: `tracking-file-tab${selected ? " selected" : ""}`, title: selected && requested ? `${entry.path} · ${t("Requested changes")}` : entry.path, onclick: () => {
+          this.selection = entry.index; this.terminalSelection = null; this.following = false; this.detail = true; this.rendered = ""; this.render();
+        } }, h("span", { class: `tracking-language lang-${ext}`, text: ext.slice(0, 4).toUpperCase() || "FILE" }),
+        h("span", { text: fileName(entry.path) }), selected && diff ? h("span", { class: "tracking-edit-dot" }) : null));
+      }
       const code = h("div", { class: "tracking-code" });
-      const rows = previewLines(file, diff);
+      const preview = previewLines(file, diff, requested);
+      const rows = phase === "edit" ? preview.filter((line) => line.kind !== "context") : preview;
       for (const line of rows) {
         const text = h("span", { class: "code-line-text" });
         for (const token of codeTokens(line.text, path)) text.append(h("span", { class: `code-token-${token.kind}`, text: token.text }));
@@ -167,22 +206,12 @@ export class ActivityCard {
       }
       if (!rows.length) code.append(h("div", { class: "diff-note", text: t("No detail available.") }));
       const editor = h("div", { class: "tracking-editor diff-card" },
-        h("div", { class: "tracking-filebar" }, fileButton, h("button", { class: "tracking-file-path", title: path, text: relative,
+        h("div", { class: "tracking-filebar" }, tabs, h("button", { class: "tracking-file-path", title: path, text: relative,
           onclick: () => this.hooks.open(path) })), code);
-      if (terminal?.command || terminal?.output) {
-        const output = h("pre", { class: terminal.failed ? "terminal-output failed" : "terminal-output" });
-        const plain = (terminal.output ?? "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
-        for (const [index, line] of plain.split("\n").entries()) {
-          if (index) output.append("\n");
-          const result = /^(\s*)(PASS|FAIL)(\b.*)$/.exec(line);
-          if (result) output.append(result[1], h("span", { class: result[2] === "PASS" ? "terminal-pass" : "terminal-fail", text: result[2] }), result[3]);
-          else output.append(line);
-        }
-        editor.append(h("div", { class: "tracking-terminal" }, h("div", { class: "terminal-command", text: `$ ${terminal.command ?? ""}` }), output));
-      }
       this.body.append(editor);
+      tabs.querySelector(".selected")?.scrollIntoView({ block: "nearest", inline: "nearest" });
       const firstChanged = rows.findIndex((line) => line.kind !== "context");
-      if (firstChanged > 3) code.scrollTop = (firstChanged - 3) * 16;
+      if (firstChanged > 3) code.scrollTop = (firstChanged - 3) * 18;
       return;
     }
     const list = h("div", { class: "activity-list" });
@@ -199,6 +228,7 @@ export class ActivityCard {
         title: text,
         onclick: () => {
           this.selection = index;
+          this.section = null;
           this.following = false;
           this.detail = true;
           this.rendered = "";
@@ -218,5 +248,41 @@ export class ActivityCard {
     } }));
     this.body.append(list);
     list.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
+  }
+
+  private renderTerminal(entries: ActivityDetail[], tests: boolean) {
+    const commands = h("div", { class: "tracking-file-tabs terminal-command-tabs", role: "tablist", title: tl("History") });
+    const output = h("section", { class: "tracking-code tracking-terminal terminal-entry terminal-current-output" });
+    const buttons: HTMLButtonElement[] = [];
+    const show = (index: number) => {
+      const entry = entries[index];
+      if (!entry) return;
+      clear(output);
+      buttons.forEach((button, position) => {
+        button.classList.toggle("selected", position === index);
+        button.setAttribute("aria-selected", String(position === index));
+      });
+      if (!tests && entry.command) output.append(h("div", { class: "terminal-command", text: `$ ${entry.command}` }));
+      output.append(terminalOutput(entry.output ?? "", entry.failed));
+      output.scrollTop = 0;
+      buttons[index]?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    };
+    for (const [index, entry] of entries.entries()) {
+      const button = h("button", { class: "tracking-file-tab terminal-command-tab", role: "tab", title: entry.command ?? entry.tool,
+        onclick: () => { this.following = false; this.terminalSelection = index; show(index); } },
+        svg(ICONS.terminal, 11, { stroke: 1.5 }), h("span", { text: commandTabName(entry.command ?? entry.tool) }));
+      buttons.push(button);
+      commands.append(button);
+    }
+    commands.addEventListener("wheel", (event) => {
+      if (commands.scrollWidth <= commands.clientWidth) return;
+      commands.scrollLeft += event.deltaX || event.deltaY;
+      event.preventDefault();
+    }, { passive: false });
+    show(this.terminalSelection == null ? entries.length - 1 : Math.min(this.terminalSelection, entries.length - 1));
+    if (!entries.length) output.append(terminalOutput(t("No detail available.")));
+    this.body.append(h("div", { class: "tracking-editor diff-card terminal-only" },
+      h("div", { class: "tracking-filebar" }, commands), output));
+    commands.querySelector(".selected")?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
 }

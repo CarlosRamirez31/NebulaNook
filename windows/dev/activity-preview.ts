@@ -23,7 +23,8 @@ function seed(stage: string) {
   State.setActivityDetail(task.id, { tool: "Read", phase: "read", completed: true, file: { path, content: oldText, startLine: 10 } });
   if (stage !== "read") {
     State.appendStep(task.id, "Edit · invoice.ts");
-    State.setActivityDetail(task.id, { tool: "Edit", phase: "edit", completed: false, file: { path, content: oldText, startLine: 10 } });
+    State.setActivityDetail(task.id, { tool: "Edit", phase: "edit", completed: false, file: { path, content: oldText, startLine: 10 },
+      requestedDiff: stage === "edit" ? fromEdit(oldText, newText, path) : undefined });
   }
   if (stage === "bash" || stage === "done") {
     const diff = fromEdit(oldText, newText, path);
@@ -31,7 +32,7 @@ function seed(stage: string) {
     State.appendStep(task.id, makeDiffStep("invoice.ts", diff.added, diff.removed, id));
     State.setActivityDetail(task.id, { tool: "Edit", phase: "edit", completed: true, file: { path, content: newText, startLine: 10 } });
     State.appendStep(task.id, "Bash · npm test");
-    State.setActivityDetail(task.id, { tool: "Bash", phase: "bash", completed: stage === "done", command: "npm test", output: stage === "done" ? "PASS  tests/invoice.test.ts" : "" });
+    State.setActivityDetail(task.id, { tool: "Bash", phase: "bash", completed: stage === "done", command: "npm test", output: stage === "done" ? "PASS  tests/invoice.test.ts\nTests: 48 passed, 48 total" : "Running tests/invoice.test.ts" });
   }
   if (stage === "done") {
     State.appendStep(task.id, "Updated the tax rate and rounded the total.");
