@@ -6,6 +6,7 @@ import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
 import {
   EXPANDED_CORNER, EXPANDED_W, NOTCH_W, PANEL_H, PANEL_W,
   ROUNDED_CORNER, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
+  clientToDesignCss, domToDesignCss,
   islandSize,
   QUESTION_PICKER_H,
   TRACKING_H,
@@ -38,7 +39,7 @@ const CLAUDE_DESKTOP_ID = "agent_claude-desktop";
 /** Extra canvas on each side of Mochi, for the witch hat's brim and the Santa hat's tip. */
 const BOT_SIDE = 24;
 /** Same margin as the Rust hit test (src-tauri/src/island.rs). */
-const HIT_MARGIN = 14;
+const HIT_MARGIN = 40;
 
 /** The three views the drop sequence owns; leaving them stops the engine. */
 const UPLOAD_VIEWS: ReadonlySet<IslandViewName> = new Set(["upload", "uploading", "choose"]);
@@ -601,6 +602,7 @@ export class Island {
   /** The small preview expands only when the user asks to inspect it. */
   expandActivity() {
     if (State.pendingApproval) return;
+    this.fsm.userInteracted();
     State.activityExpanded = true;
     this.expand("overview");
   }
@@ -765,8 +767,9 @@ export class Island {
     this.greetingCanvas.style.left = `${(w - EXPANDED_W) / 2}px`;
     this.uploadCanvas.el.style.left = `${(w - EXPANDED_W) / 2}px`;
 
-    const viewportW = window.innerWidth > 0 ? window.innerWidth : PANEL_W;
-    const rect = { x: (viewportW - w) / 2, y: 0, w, h: hh };
+    // Hit region must track the painted island after UI_SCALE zoom — measuring
+    // the DOM box avoids a smaller native input region than the visible panel.
+    const rect = this.islandRect();
     const p = this.pushedRect;
     if (Math.abs(p.x - rect.x) > 0.5 || Math.abs(p.w - rect.w) > 0.5 || Math.abs(p.h - rect.h) > 0.5) {
       this.pushedRect = rect;
@@ -774,12 +777,20 @@ export class Island {
     }
   }
 
-  /** Island rect in window coordinates (origin top-left of the 720×320 window). */
+  /**
+   * Island rect in design CSS (origin top-left of the 720×320 panel). Taken from
+   * the painted box so Linux hit-testing matches the enlarged visual after zoom.
+   */
   private islandRect(): { x: number; y: number; w: number; h: number } {
+    if (this.islandEl) {
+      const r = this.islandEl.getBoundingClientRect();
+      if (r.width > 0 || r.height > 0) {
+        return domToDesignCss(r, window.innerWidth || PANEL_W);
+      }
+    }
     const w = this.width.value;
     const hh = this.height.value;
-    const viewportW = window.innerWidth > 0 ? window.innerWidth : PANEL_W;
-    return { x: (viewportW - w) / 2, y: 0, w, h: hh };
+    return { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
   }
 
   // ── Window collapse (hidden → tiny wake strip, zero polling) ────────────────
@@ -817,15 +828,16 @@ export class Island {
     this.islandEl.addEventListener("mousedown", (e) => {
       Sound.resume();
       State.lastActivity = performance.now();
-      // A click makes a hover-opened island an ordinary open one.
-      // Inspecting an activity preview must still close it when the mouse leaves.
-      if (!this.fsm.openedByHover || !State.tasks.some(hasSessionTicker)) this.fsm.userInteracted();
+      const ptr = this.designPointer(e);
+      // Any explicit click ends hover-only closing, even while an agent is
+      // active, so edge controls remain reachable while the pointer moves.
+      this.fsm.userInteracted();
       // A press on Mochi may become a drag out to the desktop.
-      if (e.button === 0 && this.isBotHit(e.clientX, e.clientY)) {
-        this.botPress = { x: e.clientX, y: e.clientY };
+      if (e.button === 0 && this.isBotHit(ptr.x, ptr.y)) {
+        this.botPress = { x: ptr.x, y: ptr.y };
       }
       // Right-click on Mochi opens the wardrobe, and closes it again.
-      if (e.button === 2 && this.isBotHit(e.clientX, e.clientY)) {
+      if (e.button === 2 && this.isBotHit(ptr.x, ptr.y)) {
         this.cancelBotHover();
         this.toggleWardrobe();
         return;
@@ -834,7 +846,7 @@ export class Island {
         this.fsm.click();
         return;
       }
-      if (this.isBotHit(e.clientX, e.clientY)) {
+      if (this.isBotHit(ptr.x, ptr.y)) {
         this.cancelBotHover();
         this.engine.slap();
       }
@@ -843,13 +855,15 @@ export class Island {
     // No browser menu over Mochi: his right-click is the wardrobe. Everywhere
     // else (the chat field) the webview keeps its own menu.
     this.islandEl.addEventListener("contextmenu", (e) => {
-      if (this.isBotHit(e.clientX, e.clientY)) e.preventDefault();
+      const ptr = this.designPointer(e);
+      if (this.isBotHit(ptr.x, ptr.y)) e.preventDefault();
     });
 
     // Dragging Mochi out of the island puts him on the desktop.
     window.addEventListener("mousemove", (e) => {
+      const ptr = this.designPointer(e);
       if (this.desktop.carrying) {
-        this.desktop.carry(e.clientX, e.clientY);
+        this.desktop.carry(ptr.x, ptr.y);
         return;
       }
       const press = this.botPress;
@@ -858,15 +872,18 @@ export class Island {
         this.botPress = null;
         return;
       }
-      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) <= DRAG_THRESHOLD) return;
+      if (Math.hypot(ptr.x - press.x, ptr.y - press.y) <= DRAG_THRESHOLD) return;
       this.botPress = null;
       if (!this.canDragOut()) return;
       this.cancelBotHover();
-      this.desktop.pickUp(e.clientX, e.clientY);
+      this.desktop.pickUp(ptr.x, ptr.y);
     });
     window.addEventListener("mouseup", (e) => {
       this.botPress = null;
-      if (this.desktop.carrying) this.desktop.carryEnd(e.clientX, e.clientY);
+      if (this.desktop.carrying) {
+        const ptr = this.designPointer(e);
+        this.desktop.carryEnd(ptr.x, ptr.y);
+      }
     });
 
     // Only keys typed into the island itself land here, never Escape typed in
@@ -893,8 +910,19 @@ export class Island {
    * fire while the pointer is over the island, so leaving the window is
    * reported as a cursor far away, which is what the poll would have said.
    */
+  /** Client/page pointer → design CSS (same space as islandRect / Rust from_css). */
+  private designPointer(e: { clientX: number; clientY: number }): { x: number; y: number } {
+    return clientToDesignCss(e.clientX, e.clientY, window.innerWidth || PANEL_W);
+  }
+
   followPageCursor() {
-    window.addEventListener("mousemove", (e) => this.onCursor(e.clientX, e.clientY));
+    // WebKitGTK client coords follow the layout viewport; after UI_SCALE zoom that
+    // may still be the enlarged window. Map into design CSS so hit tests match
+    // islandRect() / setIslandRect (Rust then scales with UI_SCALE).
+    window.addEventListener("mousemove", (e) => {
+      const { x, y } = this.designPointer(e);
+      this.onCursor(x, y);
+    });
     window.addEventListener("mouseout", (e) => {
       if (e.relatedTarget == null) this.onCursor(-10_000, -10_000);
     });
@@ -910,7 +938,7 @@ export class Island {
     this.pointerInside = inside;
   }
 
-  /** Cursor in window-logical coordinates. */
+  /** Cursor in the island's design-CSS coordinates. */
   onCursor(x: number, y: number) {
     // WebKitGTK can deliver a mousemove after the pointer has left the layer
     // surface; trusting it re-enters the island and the auto-close never runs.

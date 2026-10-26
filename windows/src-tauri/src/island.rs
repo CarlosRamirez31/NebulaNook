@@ -24,11 +24,12 @@ pub const STRIP_H: f64 = 6.0 * UI_SCALE;
 
 pub const WINDOW_LABEL: &str = "island";
 
-/// Margin around the island that still counts as "on the island", in logical px.
-/// Wider than the macOS 6 pt because a click must never be swallowed.
-const HIT_MARGIN: f64 = 14.0 * UI_SCALE;
+/// Design-CSS margin for the transparent side gutters of the full panel.
+/// Rust scales it natively so the edge controls stay reachable while moving.
+const HIT_MARGIN: f64 = 40.0 * UI_SCALE;
 
 #[derive(Serialize, Clone)]
+/// Cursor position in the page's design-CSS coordinates.
 pub struct CursorPayload {
     pub x: f64,
     pub y: f64,
@@ -49,7 +50,7 @@ pub struct ScreenInfo {
     pub scale: f64,
 }
 
-/// The island shape in window-logical coordinates, pushed by the front end.
+/// The island shape in native window-logical coordinates.
 /// The poll thread owns the click-through decision so it lands in the same 16 ms
 /// tick as the cursor read — an IPC round trip here loses clicks.
 #[derive(Clone, Copy, Default)]
@@ -440,8 +441,8 @@ fn current_screen_key(app: &AppHandle) -> Option<(i32, i32, u32, u32, u64)> {
     Some((p.x, p.y, size.width, size.height, m.scale_factor().to_bits()))
 }
 
-/// Emits `cursor` (window-logical coordinates) at ~60 Hz while the island is
-/// visible. Parked on a condvar the rest of the time.
+/// Reads the native cursor at ~60 Hz and emits design-CSS coordinates while the
+/// island is visible. Parked on a condvar the rest of the time.
 pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
     std::thread::spawn(move || {
         let mut was_down = false;

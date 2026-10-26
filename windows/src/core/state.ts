@@ -227,7 +227,7 @@ class AppState {
 
   stateOverride: BotStateName | null = null;
 
-  /** Cursor in logical screen pixels, origin top-left (like AppState.mousePosition). */
+  /** Cursor in island design-CSS pixels, origin at its window's top-left. */
   mouse = { x: 0, y: 0 };
   /** Cursor relative to the island's top-left corner. */
   mouseInIsland = { x: 0, y: 0 };

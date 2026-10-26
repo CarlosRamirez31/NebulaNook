@@ -54,8 +54,35 @@ export interface ViewLayout {
 
 // The window is a fixed 720×320 (largest view) like the macOS panel; the island is
 // drawn inside it, glued to the top edge and horizontally centred.
+// UI_SCALE matches windows/src-tauri/src/island.rs: the native window and hit
+// region are PANEL_* × UI_SCALE; the page keeps design CSS and the webview zoom
+// bridges the two.
+export const UI_SCALE = 1.4;
 export const PANEL_W = 720;
 export const PANEL_H = 320;
+
+/** Map a DOM/client box into design-CSS coordinates (PANEL_W-wide viewport). */
+export function domToDesignCss(
+  dom: { left: number; top: number; width: number; height: number },
+  viewportW: number,
+  panelW = PANEL_W,
+): { x: number; y: number; w: number; h: number } {
+  const vw = viewportW > 0 ? viewportW : panelW;
+  const s = panelW / vw;
+  return { x: dom.left * s, y: dom.top * s, w: dom.width * s, h: dom.height * s };
+}
+
+/** Page/client pointer → design CSS, same scale as {@link domToDesignCss}. */
+export function clientToDesignCss(
+  clientX: number,
+  clientY: number,
+  viewportW: number,
+  panelW = PANEL_W,
+): { x: number; y: number } {
+  const vw = viewportW > 0 ? viewportW : panelW;
+  const s = panelW / vw;
+  return { x: clientX * s, y: clientY * s };
+}
 
 // No notch on a PC: these are the hidden/compact sizes from docs/SPEC.md.
 export const NOTCH_W = 184;
